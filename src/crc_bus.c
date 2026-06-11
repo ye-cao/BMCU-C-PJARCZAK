@@ -1,5 +1,19 @@
+/**
+ * @file crc_bus.c
+ * @brief 总线通信 CRC 校验实现
+ *
+ * 使用预计算查找表实现高效的 CRC-8 和 CRC-16 计算。
+ * CRC-8：用于 BambuBus 协议数据校验
+ * CRC-16：用于 AHUB 协议数据校验
+ */
+
 #include "crc_bus.h"
 
+/**
+ * CRC-8 查找表（256 字节，4 字节对齐）
+ * 多项式：未在运行时计算，表中已硬编码
+ * 用于 BambuBus 协议数据包的 CRC 校验
+ */
 static uint8_t g_crc8_tbl[256] __attribute__((aligned(4))) = {
     0x00u, 0x39u, 0x72u, 0x4Bu, 0xE4u, 0xDDu, 0x96u, 0xAFu, 0xF1u, 0xC8u, 0x83u, 0xBAu, 0x15u, 0x2Cu, 0x67u, 0x5Eu,
     0xDBu, 0xE2u, 0xA9u, 0x90u, 0x3Fu, 0x06u, 0x4Du, 0x74u, 0x2Au, 0x13u, 0x58u, 0x61u, 0xCEu, 0xF7u, 0xBCu, 0x85u,
@@ -19,6 +33,10 @@ static uint8_t g_crc8_tbl[256] __attribute__((aligned(4))) = {
     0x3Du, 0x04u, 0x4Fu, 0x76u, 0xD9u, 0xE0u, 0xABu, 0x92u, 0xCCu, 0xF5u, 0xBEu, 0x87u, 0x28u, 0x11u, 0x5Au, 0x63u
 };
 
+/**
+ * CRC-16 查找表（512 字节，4 字节对齐）
+ * 用于 AHUB 协议数据包的 CRC 校验
+ */
 static uint16_t g_crc16_tbl[256] __attribute__((aligned(4))) = {
     0x0000u, 0x1021u, 0x2042u, 0x3063u, 0x4084u, 0x50A5u, 0x60C6u, 0x70E7u,
     0x8108u, 0x9129u, 0xA14Au, 0xB16Bu, 0xC18Cu, 0xD1ADu, 0xE1CEu, 0xF1EFu,
@@ -54,10 +72,25 @@ static uint16_t g_crc16_tbl[256] __attribute__((aligned(4))) = {
     0x6E17u, 0x7E36u, 0x4E55u, 0x5E74u, 0x2E93u, 0x3EB2u, 0x0ED1u, 0x1EF0u
 };
 
+/**
+ * @brief CRC 模块初始化（空操作）
+ *
+ * 查表法无需运行时初始化，保留此接口用于架构一致性。
+ */
 void bus_crc_init(void)
 {
 }
 
+/**
+ * @brief 计算 CRC-8 校验值
+ *
+ * @param data  待校验数据
+ * @param len   数据长度（字节）
+ * @return      CRC-8 校验值
+ *
+ * 初始值 0x66，逐字节查表并异或。
+ * 算法：r = table[r ^ data[i]]
+ */
 uint8_t bus_crc8(const uint8_t* data, uint32_t len)
 {
     uint8_t r = 0x66u;
@@ -66,6 +99,17 @@ uint8_t bus_crc8(const uint8_t* data, uint32_t len)
     return r;
 }
 
+/**
+ * @brief 计算 CRC-16 校验值
+ *
+ * @param data  待校验数据
+ * @param len   数据长度（字节）
+ * @return      CRC-16 校验值
+ *
+ * 初始值 0x913D。
+ * 算法：取当前 CRC 高 8 位异或数据字节作为索引，
+ *       查表后与 CRC 左移 8 位异或。
+ */
 uint16_t bus_crc16(const uint8_t* data, uint32_t len)
 {
     uint16_t r = 0x913Du;

@@ -1,13 +1,37 @@
 #include "ams.h"
-_ams ams[ams_max_number];
-uint8_t bus_now_ams_num=0;
 
+/**
+ * 全局AMS单元数组（定义）
+ *
+ * 定义并实例化4个AMS单元的全局数组。
+ * 每个AMS单元包含4个耗材料槽，总共管理16个耗材位。
+ * 所有模块通过extern声明访问此数组来读写AMS和耗材数据。
+ */
+_ams ams[ams_max_number];
+
+/**
+ * 当前正在总线上通信的AMS单元编号（定义）
+ *
+ * 初始值为0，表示默认与第1个AMS单元通信。
+ * 在总线轮询或数据收发过程中，此变量会被更新为当前通信目标的索引值。
+ * 其他模块（如通信协议解析）读取此值来判断收到的数据属于哪个AMS单元。
+ */
+uint8_t bus_now_ams_num = 0;
+
+/**
+ * @brief 初始化所有AMS单元
+ *
+ * 遍历ams数组中的每个AMS单元(0~ams_max_number-1)，
+ * 依次调用其init()方法进行初始化。
+ * 初始化内容包括：重置当前使用耗材编号、使用标志位、压力值、
+ * 在线状态，以及初始化所有4个耗材料槽的参数和状态。
+ *
+ * 该函数应在系统启动后、使用AMS功能之前调用一次。
+ */
 void ams_init()
 {
-    for(uint8_t i=0;i<ams_max_number;i++)
+    for(uint8_t i = 0; i < ams_max_number; i++)
     {
         ams[i].init();
     }
 }
-
-

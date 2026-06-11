@@ -1,80 +1,79 @@
- ____  __  __   ____  _   _
+ ____  __  __   ____  _   _ 
 | __ )|  \/  | / ___|| | | |
 |  _ \| |\/| || |    | | | |
 | |_) | |  | || |___ | |_| |
 |____/|_|  |_| \____| \___/
 
 
-Which firmware folder should I choose here?
-Choose between: SOLO, AMS_A, AMS_B, AMS_C, AMS_D.
+选择哪种槽位？
+可选：SOLO、AMS_A、AMS_B、AMS_C、AMS_D
 
 
 --------------------------------------------------------------------------
 
 
-SOLO firmware
-Example file:
-- solo_0.095f.bin
+SOLO 固件
+示例文件：solo_0.095f.bin
 
-This firmware is intended for single-BMCU (SOLO) operation.
-Recommended for single-BMCU setups.
+此固件用于单 BMCU 独立工作。
+推荐用于单 BMCU 配置。
 
-Filament retraction length:
-- 0.095 m = 9.5 cm
-
-
-AMS_A / AMS_B / AMS_C / AMS_D firmware
-These firmware versions are intended for:
-- multi-BMCU setups and longer filament retraction distances.
-
-If you have ONLY ONE BMCU but you need longer retraction than SOLO provides,
-use AMS_A instead of SOLO.
+耗材回退长度：
+- 0.095 米 = 9.5 厘米
 
 
-Retraction length in filenames
-Examples:
-- ams_a_0.10f.bin  -> 0.10 m = 10 cm
-- ams_a_0.50f.bin  -> 0.50 m = 50 cm
-The number is the retraction length in meters.
+AMS_A / AMS_B / AMS_C / AMS_D 固件
+这些固件版本适用于：
+- 多 BMCU 配置
+- 需要更长的耗材回退距离
+
+如果你只有一个 BMCU 但需要比 SOLO 更长的回退距离，
+请使用 AMS_A 而不是 SOLO。
 
 
-Multi-BMCU setups (2-4 unit)
-Each BMCU must have a different AMS slot firmware:
-- 1st unit: AMS_A
-- 2nd unit: AMS_B
-- 3rd unit: AMS_C
-- 4th unit: AMS_D
+文件名中的回退长度
+示例：
+- ams_a_0.10f.bin  -> 0.10 米 = 10 厘米
+- ams_a_0.50f.bin  -> 0.50 米 = 50 厘米
+数字即回退长度（单位：米）。
 
 
-How to choose the correct retraction length (simple)
-Retraction must be calculated from the end of the AMS splitter inside the printer
-(the plastic AMS part where up to four PTFE tubes enter).
+多 BMCU 配置（2~4 个单元）
+每个 BMCU 必须使用不同的 AMS 槽位固件：
+- 第 1 个：AMS_A
+- 第 2 个：AMS_B
+- 第 3 个：AMS_C
+- 第 4 个：AMS_D
 
-Example:
-- Distance to the end of the AMS splitter: about 9.0 cm
-- SOLO retracts about 9.5 cm, so it goes about 0.5 cm past the splitter
 
-When calculating your own retraction length:
-- Always measure from the end of the AMS splitter
-- Add a small safety margin so the filament clears the splitter
+如何选择正确的回退长度（简单方法）
+回退长度必须从打印机内部 AMS 分流器末端开始计算
+（即 AMS 塑料件中最多四根 PTFE 管进入的那个位置）。
 
-Note for P1 printers:
-- Many P1 setups use longer PTFE paths, so a longer retraction is often needed.
-- Even with a single BMCU, AMS_A is often a better choice than SOLO (pick your needed length).
+示例：
+- 到 AMS 分流器末端的距离：约 9.0 厘米
+- SOLO 回退约 9.5 厘米，超出分流器约 0.5 厘米
+
+计算你自己的回退长度时：
+- 始终从 AMS 分流器末端开始测量
+- 加上少量安全余量，确保耗材完全退出分流器
+
+P1 打印机用户注意：
+- 许多 P1 配置使用较长的 PTFE 路径，因此通常需要更长的回退距离。
+- 即使只有一个 BMCU，AMS_A 通常也比 SOLO 更合适（选择你需要的长度）。
 
 
 --------------------------------------------------------------------------
 
 
-[::] All modifications by Pawel Jarczak
-[::] Also thanks to everyone on Reddit who tested this firmware on many different BMCU 370C builds.
-[::] Special thanks to Remote-Trash4593 (Reddit) for the huge effort: extensive testing + detailed documentation.
+[::] 所有修改由 Pawel Jarczak 完成
+[::] 感谢 Reddit 上所有在 BMCU 370C 上测试此固件的用户
+[::] 特别感谢 Remote-Trash4593 (Reddit) 的大量测试和详细文档
 
-[::] May compatibility with BambuLab last as long as possible.
-[::] If they ever block this last lifeboat:
-[::] - We should sell our printers and switch brands, defending our right to ownership and choice.
-[::] - When many of us bought these printers, BMCU was supported without restrictions; limits appeared only after purchase.
-[::] - BMCU was a key reason to buy; for many people AMS is too big, too expensive, and still has plenty of issues.
-[::] - The market is full of amazing 3D printers that do not lock users out - and for many of us, a 3D printer is a critical work tool.
-[::] - Open BMCU firmware gives us real freedom, and we should demand that freedom be respected.
-
+[::] 愿 BambuLab 的兼容性尽可能长久地维持下去。
+[::] 如果他们封锁了这最后的途径：
+[::] - 我们应该卖掉打印机并更换品牌，维护我们作为用户的所有权和选择权。
+[::] - 我们许多人购买这些打印机时，BMCU 是不受限制的；限制是在购买后才出现的。
+[::] - BMCU 是购买的关键原因；对许多人来说，AMS 太大、太贵，而且问题很多。
+[::] - 市场上有许多优秀的 3D 打印机不会限制用户——对我们许多人来说，3D 打印机是关键的工作工具。
+[::] - 开放的 BMCU 固件给了我们真正的自由，我们应该要求这种自由得到尊重。

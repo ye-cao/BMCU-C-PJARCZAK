@@ -1,3 +1,16 @@
+/**
+ * @file    Motion_control.cpp
+ * @brief   BMCU-C 运动控制模块实现 —— 4通道耗材架完整运动逻辑
+ *
+ * 主要功能模块：
+ *   1. AS5600 磁性编码器数据读取与速度计算
+ *   2. PID 电机速度/压力控制器
+ *   3. 电机 PWM 输出（4通道，通过 TIM2/TIM3/TIM4）
+ *   4. ADC 传感器读取（速度传感器 + 微动开关）
+ *   5. 运动状态机（idle/send/pull/on_use/pull_back 等）
+ *   6. 双微动开关自动加载/卸料辅助（DM 型号）
+ *   7. 堵转检测与保护、校准重置、电机方向校准
+ */
 #include "Motion_control.h"
 #include "ams.h"
 #include "ADC_DMA.h"
@@ -7,7 +20,9 @@
 #include "app_api.h"
 #include "hal/time_hw.h"
 
+/** @brief 计算浮点数绝对值 */
 static inline float absf(float x) { return (x < 0.0f) ? -x : x; }
+/** @brief 将浮点数限制在 [a, b] 区间内 */
 static inline float clampf(float x, float a, float b)
 {
     if (x < a) return a;
@@ -15,6 +30,10 @@ static inline float clampf(float x, float a, float b)
     return x;
 }
 
+/**
+ * @brief 将电压值转换为 centi-volt 格式（向上取整），用于存储到 uint8_t
+ *        centi-volt = voltage * 100，向上取整确保不低估阈值
+ */
 static inline uint8_t dm_key_v_to_centi_ceil(float v)
 {
     if (v <= 0.0f) return 0u;
@@ -28,17 +47,29 @@ static inline uint8_t dm_key_v_to_centi_ceil(float v)
     return (uint8_t)iv;
 }
 
+/** @brief 将 centi-volt 格式值转换回电压值（cv * 0.01V） */
 static inline float dm_key_centi_to_v(uint8_t cv)
 {
     return 0.01f * (float)cv;
 }
 
+/* ==================== 高精度时间系统 ==================== */
+
+/** @brief 上次读取的 64 位硬件 tick 值 */
 static uint64_t g_time_last_ticks64 = 0ull;
+/** @brief 除法后剩余的 tick 数（用于累积避免精度损失） */
 static uint32_t g_time_rem_ticks32  = 0u;
+/** @brief 累积的毫秒数 */
 static uint64_t g_time_ms64         = 0ull;
+/** @brief 上次使用的 ticks-per-ms 值（检测时钟变化） */
 static uint32_t g_time_tpm_last     = 0u;
+/** @brief 时间系统是否已初始化标志 */
 static uint8_t  g_time_inited       = 0u;
 
+/**
+ * @brief 从 64 位硬件 tick 快速转换为毫秒（增量累加方式）
+ *        避免每次除法运算，仅在时钟变化或溢出时完整除法
+ */
 static inline __attribute__((always_inline)) uint64_t time_ms_fast_from_ticks64(uint64_t now_ticks)
 {
     uint32_t tpm = time_hw_tpms;
@@ -96,6 +127,10 @@ static inline __attribute__((always_inline)) uint64_t time_ms_fast(void)
     return time_ms_fast_from_ticks64(time_ticks64());
 }
 
+/**
+ * @brief 根据压力误差计算回退力矩（分段线性映射）
+ *        err<=0.10:无回退, 0.10~0.35:450~550, 0.35~2.35:550~850
+ */
 static inline float retract_mag_from_err(float err, float mag_max)
 {
     constexpr float e0 = 0.10f;
@@ -123,6 +158,7 @@ static inline float retract_mag_from_err(float err, float mag_max)
 }
 
 
+/** @brief 滞回比较器：防止阈值边界频繁切换（start=激活, stop=停止） */
 static inline uint8_t hyst_u8(uint8_t active, float v, float start, float stop)
 {
     if (active) { if (v <= stop)  active = 0; }
@@ -131,55 +167,97 @@ static inline uint8_t hyst_u8(uint8_t active, float v, float start, float stop)
 }
 
 
+/** @brief 通道数量（固定4通道） */
 static constexpr uint8_t  kChCount = 4;
+/** @brief PWM 最大值（1000 = 100% 占空比） */
 static constexpr int      PWM_lim  = 1000;
-static constexpr float    kAS5600_PI = 3.14159265358979323846f;
+/** @brief 圆周率，用于 AS5600 角度转距离计算 */
+static constexpr float kAS5600_PI = 3.14159265358979323846f;
 
-// stała do przeliczenia AS5600 - liczona raz
+/**
+ * @brief AS5600 每计数对应的耗材位移（mm/count）
+ * 公式：-(π × 滚轮直径7.5mm) / 4096（每圈计数），负号=计数增加=回退
+ */
 static constexpr float kAS5600_MM_PER_CNT = -(kAS5600_PI * 7.5f) / 4096.0f;
 
-// ===== AS5600 =====
+/* ==================== AS5600 编码器配置 ==================== */
+
+/** @brief 全局 AS5600 软件 I2C 驱动实例，管理4通道编码器 */
 AS5600_soft_IIC_many MC_AS5600;
+/** @brief 各通道 AS5600 SCL 时钟线 GPIO 端口 */
 static GPIO_TypeDef* const AS5600_SCL_PORT[4] = { GPIOB, GPIOB, GPIOB, GPIOB };
+/** @brief 各通道 AS5600 SCL 时钟线 GPIO 引脚 */
 static const uint16_t      AS5600_SCL_PIN [4] = { GPIO_Pin_15, GPIO_Pin_14, GPIO_Pin_13, GPIO_Pin_12 };
+/** @brief 各通道 AS5600 SDA 数据线 GPIO 端口 */
 static GPIO_TypeDef* const AS5600_SDA_PORT[4] = { GPIOD, GPIOC, GPIOC, GPIOC };
+/** @brief 各通道 AS5600 SDA 数据线 GPIO 引脚 */
 static const uint16_t      AS5600_SDA_PIN [4] = { GPIO_Pin_0, GPIO_Pin_15, GPIO_Pin_14, GPIO_Pin_13 };
 
+/** @brief 各通道实时速度（mm/s），正值=送丝，负值=回退 */
 float speed_as5600[4] = {0, 0, 0, 0};
-// ===== AS5600 health gate (anti-runaway) =====
+/* ===== AS5600 传感器健康监控（防飞车保护）===== */
+/** @brief 传感器健康标志（1=正常, 0=故障），连续失败3次才标记故障 */
 static uint8_t g_as5600_good[4]     = {0,0,0,0};
+/** @brief 通信失败计数器 */
 static uint8_t g_as5600_fail[4]     = {0,0,0,0};
+/** @brief 通信成功连续计数器 */
 static uint8_t g_as5600_okstreak[4] = {0,0,0,0};
+/** @brief 故障触发阈值：连续失败3次 */
 static constexpr uint8_t kAS5600_FAIL_TRIP   = 3;
+/** @brief 恢复触发阈值：连续成功2次 */
 static constexpr uint8_t kAS5600_OK_RECOVER  = 2;
+/** @brief 检查指定通道 AS5600 是否健康 */
 static inline bool AS5600_is_good(uint8_t ch) { return g_as5600_good[ch] != 0; }
 
-// ---- liniowe zwalnianie końcówki + minimalny PWM ----
+/* ---- 回退运动参数 ---- */
+/** @brief 回退快速速度（60 mm/s） */
 static constexpr float PULL_V_FAST   = 60.0f;   // mm/s
-static constexpr float PULL_V_END    = 12.0f;   // mm/s na samym końcu
-static constexpr float PULL_RAMP_M   = 0.015f;  // 15mm strefa hamowania
-static constexpr float PULL_PWM_MIN  = 400.0f;  // "kop" przy pullback
+/** @brief 回退末段慢速（12 mm/s），防止冲击 */
+static constexpr float PULL_V_END    = 12.0f;   // mm/s
+/** @brief 减速区长度（15mm），低于此距离开始减速 */
+static constexpr float PULL_RAMP_M   = 0.015f;  // 15mm
+/** @brief 回退最小 PWM（400），确保末端有足够"踢力" */
+static constexpr float PULL_PWM_MIN  = 400.0f;  // "kick"
 
+/** @brief 各通道回退剩余距离（米），用于减速区计算 */
 static float g_pull_remain_m[4]  = {0,0,0,0};
-static float g_pull_speed_set[4] = {-PULL_V_FAST,-PULL_V_FAST,-PULL_V_FAST,-PULL_V_FAST}; // mm/s (ujemne)
+/** @brief 各通道回退目标速度（mm/s，负值=反向） */
+static float g_pull_speed_set[4] = {-PULL_V_FAST,-PULL_V_FAST,-PULL_V_FAST,-PULL_V_FAST};
 
+/** @brief 各通道速度传感器电压偏移补偿量（V） */
 float MC_PULL_V_OFFSET[4]      = {0.0f, 0.0f, 0.0f, 0.0f};
+/** @brief 各通道传感器最小电压（行程起点） */
 float MC_PULL_V_MIN[4]         = {1.00f, 1.00f, 1.00f, 1.00f};
+/** @brief 各通道传感器最大电压（行程终点） */
 float MC_PULL_V_MAX[4]         = {2.00f, 2.00f, 2.00f, 2.00f};
+/** @brief 各通道传感器极性（+1正常, -1反向） */
 int8_t MC_PULL_POLARITY[4]     = {1, 1, 1, 1};
+/** @brief 双微动开关"无料"电压阈值（V） */
 float MC_DM_KEY_NONE_THRESH[4] = {0.60f, 0.60f, 0.60f, 0.60f};
 
+/** @brief 各通道百分比读数（0~100 整数，四舍五入） */
 uint8_t MC_PULL_pct[4]        = {50, 50, 50, 50};
+/** @brief 各通道百分比读数（浮点精确值，用于PID） */
 static float MC_PULL_pct_f[4] = {50.0f, 50.0f, 50.0f, 50.0f};
 
+/** @brief 各通道传感器原始电压（已补偿偏移和极性） */
 static float  MC_PULL_stu_raw[4]        = {1.65f, 1.65f, 1.65f, 1.65f};
+/** @brief 各通道传感器状态：-1=低压力, 0=中位, 1=高压力 */
 static int8_t MC_PULL_stu[4]            = {0, 0, 0, 0};
 
+/** @brief 各通道在线检测状态：0=无料, 1=双开关(到位), 2=仅外部开关(插入中) */
 static uint8_t  MC_ONLINE_key_stu[4]    = {0, 0, 0, 0};
-static uint8_t  g_on_use_low_latch[4]   = {0, 0, 0, 0};   // 1=stop motor latch
-static uint8_t  g_on_use_jam_latch[4]   = {0, 0, 0, 0};   // 1=real jam -> 0xF06F
+/** @brief 低压力锁存标志（1=电机停止锁存），on_use下压力<40%时触发 */
+static uint8_t  g_on_use_low_latch[4]   = {0, 0, 0, 0};
+/** @brief 真实堵转锁存（1=上报0xF06F错误） */
+static uint8_t  g_on_use_jam_latch[4]   = {0, 0, 0, 0};
+/** @brief 高PWM推力累计时间（微秒），持续20秒触发非堵转停机 */
 static uint32_t g_on_use_hi_pwm_us[4]   = {0u, 0u, 0u, 0u};
 
+/**
+ * @brief 设置状态指示灯RGB（带锁存保护）
+ *        当g_on_use_low_latch有效时强制显示红色警告
+ */
 static inline __attribute__((always_inline)) void MC_STU_RGB_set_latch(uint8_t ch, uint8_t r, uint8_t g, uint8_t b, uint64_t now_ms, uint8_t blink)
 {
     if (!g_on_use_low_latch[ch]) { MC_STU_RGB_set(ch, r, g, b); return; }
@@ -190,7 +268,13 @@ static inline __attribute__((always_inline)) void MC_STU_RGB_set_latch(uint8_t c
         MC_STU_RGB_set(ch, r, g, b);
 }
 
+/* ==================== 双微动开关检测逻辑 ==================== */
+
 #if BMCU_DM_TWO_MICROSWITCH
+/**
+ * @brief 将双微动开关电压转换为数字状态
+ *        0=无料, 1=双开关(到位), 2=仅外部开关(插入中), 3=其他
+ */
 static inline uint8_t dm_key_to_state(uint8_t ch, float v)
 {
     const float none_thr = MC_DM_KEY_NONE_THRESH[ch];
@@ -201,133 +285,187 @@ static inline uint8_t dm_key_to_state(uint8_t ch, float v)
     return 3u;
 }
 
-// ---- DM autoload (two microswitch) ----
+/* ---- DM 自动加载状态机参数 ---- */
+/** @brief Stage1 防抖时间（100ms） */
 static constexpr uint64_t DM_AUTO_S1_DEBOUNCE_MS       = 100ull;   // 0.1s
+/** @brief Stage1 超时时间（5s）：推料超时判定失败 */
 static constexpr uint64_t DM_AUTO_S1_TIMEOUT_MS        = 5000ull;  // 5s
+/** @brief Stage1 失败后回退时间（1.5s） */
 static constexpr uint64_t DM_AUTO_S1_FAIL_RETRACT_MS   = 1500ull;  // 1.5s
 
+/** @brief Stage2 目标推料距离（120mm） */
 static constexpr float    DM_AUTO_S2_TARGET_M          = 0.120f;   // 120mm
+/** @brief Stage2 中止阈值（75%）：压力超过此值中止推料 */
 static constexpr float    DM_AUTO_BUF_ABORT_PCT        = 75.0f;    // abort push
-static constexpr float    DM_AUTO_BUF_RECOVER_PCT      = 50.2f;    // retract-to (try 1/2)
-static constexpr uint64_t DM_AUTO_FAIL_EXTRA_MS        = 1500ull;  // extra retract after fail
+/** @brief Stage2 恢复阈值（50.2%）：回退到此值重新尝试 */
+static constexpr float    DM_AUTO_BUF_RECOVER_PCT      = 50.2f;    // retract-to
+/** @brief Stage2 失败后额外回退时间（1.5s） */
+static constexpr uint64_t DM_AUTO_FAIL_EXTRA_MS        = 1500ull;  // extra retract
+/** @brief 自动加载推料 PWM（90%占空比） */
 static constexpr float    DM_AUTO_PWM_PUSH             = 900.0f;   // push strength
+/** @brief 自动加载回退 PWM（90%占空比） */
 static constexpr float    DM_AUTO_PWM_PULL             = 900.0f;   // retract strength
-static constexpr float    DM_AUTO_IDLE_LIM             = 950.0f;   // clamp only during autoload
+/** @brief 自动加载期间的PWM限制值 */
+static constexpr float    DM_AUTO_IDLE_LIM             = 950.0f;   // clamp only
 
+/**
+ * @brief DM 自动加载状态机状态枚举
+ * IDLE→S1_DEBOUNCE→S1_PUSH→S2_PUSH→完成 | 任何失败→FAIL_RETRACT→IDLE
+ */
 enum : uint8_t
 {
-    DM_AUTO_IDLE = 0,
-    DM_AUTO_S1_DEBOUNCE,
-    DM_AUTO_S1_PUSH,
-    DM_AUTO_S1_FAIL_RETRACT,
-    DM_AUTO_S2_PUSH,
-    DM_AUTO_S2_RETRACT,
-    DM_AUTO_S2_FAIL_RETRACT,
-    DM_AUTO_S2_FAIL_EXTRA,
+    DM_AUTO_IDLE = 0,              /**< 空闲，等待触发 */
+    DM_AUTO_S1_DEBOUNCE,           /**< Stage1 防抖等待 */
+    DM_AUTO_S1_PUSH,               /**< Stage1 推料至双开关位置 */
+    DM_AUTO_S1_FAIL_RETRACT,       /**< Stage1 失败回退 */
+    DM_AUTO_S2_PUSH,               /**< Stage2 推料至目标距离 */
+    DM_AUTO_S2_RETRACT,            /**< Stage2 压力过大回退重试 */
+    DM_AUTO_S2_FAIL_RETRACT,       /**< Stage2 失败回退（3次中止后） */
+    DM_AUTO_S2_FAIL_EXTRA,         /**< Stage2 额外回退等待 */
 };
 
-static uint8_t  dm_loaded[4]            = {1,1,1,1};   // 1=loaded (after stage2 success)
-static uint8_t  dm_fail_latch[4]        = {0,0,0,0};   // latch until ks==0 (<0.6V)
+/** @brief 各通道是否已加载（1=已加载，加载成功后置1） */
+static uint8_t  dm_loaded[4]            = {1,1,1,1};
+/** @brief 失败锁存（1=失败，需等微动归零后清除） */
+static uint8_t  dm_fail_latch[4]        = {0,0,0,0};
+/** @brief 自动加载状态机当前状态 */
 static uint8_t  dm_auto_state[4]        = {0,0,0,0};
-static uint8_t  dm_autoload_gate[4]     = {0,0,0,0}; // 0=allow Stage1, 1=block Stage1 until idle+ks==0
-static uint8_t  dm_auto_try[4]          = {0,0,0,0};   // abort count (stage2)
+/** @brief 自动加载门控（0=允许Stage1, 1=阻止直到空闲+无料） */
+static uint8_t  dm_autoload_gate[4]     = {0,0,0,0};
+/** @brief Stage2 中止重试计数（达3次永久失败） */
+static uint8_t  dm_auto_try[4]          = {0,0,0,0};
+/** @brief 自动加载时间戳（毫秒） */
 static uint64_t dm_auto_t0_ms[4]        = {0ull,0ull,0ull,0ull};
+/** @brief Stage2 剩余推料距离（米） */
 static float    dm_auto_remain_m[4]     = {0,0,0,0};
+/** @brief Stage2 上次耗材位置（米），用于计算增量 */
 static float    dm_auto_last_m[4]       = {0,0,0,0};
-
+/** @brief 耗材掉落检测时间戳（毫秒） */
 static uint64_t dm_loaded_drop_t0_ms[4] = {0ull,0ull,0ull,0ull};
 #endif
 
+/* ==================== 自动卸料参数 ==================== */
+/** @brief 自动卸料触发阈值（80%）：压力超过此值触发 */
 static constexpr float    AUTO_UNLOAD_START_PCT      = 80.0f;
+/** @brief 中性区下界（45%）：回到此值以下确认卸料成功 */
 static constexpr float    AUTO_UNLOAD_NEUTRAL_LO_PCT = 45.0f;
+/** @brief 中性区上界（55%）：在此区间内确认成功 */
 static constexpr float    AUTO_UNLOAD_NEUTRAL_HI_PCT = 55.0f;
+/** @brief 中止阈值（35%）：低于此值中止卸料 */
 static constexpr float    AUTO_UNLOAD_ABORT_PCT      = 35.0f;
+/** @brief 预备时间（1s）：触发后等待确认持续高压力 */
 static constexpr uint64_t AUTO_UNLOAD_ARM_MS         = 1000ull;
+/** @brief 最大执行时间（15s）：超时强制停止 */
 static constexpr uint64_t AUTO_UNLOAD_MAX_MS         = 15000ull;
+/** @brief 空载检测时间（1.5s）：压力低于中性区后持续此时间确认完成 */
 static constexpr uint64_t AUTO_UNLOAD_EMPTY_MS       = 1500ull;
+/** @brief 回退PWM（85%占空比） */
 static constexpr float    AUTO_UNLOAD_PWM_PULL       = 850.0f;
 
+/** @brief 自动卸料预备状态标志（1=已触发等待确认） */
 static uint8_t  auto_unload_arm[4]          = {0,0,0,0};
+/** @brief 自动卸料激活状态标志（1=正在执行卸料） */
 static uint8_t  auto_unload_active[4]       = {0,0,0,0};
+/** @brief 自动卸料阻塞标志（1=已成功/失败，阻止再次触发） */
 static uint8_t  auto_unload_blocked[4]      = {0,0,0,0};
+/** @brief 预备状态开始时间戳（毫秒） */
 static uint64_t auto_unload_arm_t0_ms[4]    = {0ull,0ull,0ull,0ull};
+/** @brief 激活状态开始时间戳（毫秒） */
 static uint64_t auto_unload_active_t0_ms[4] = {0ull,0ull,0ull,0ull};
+/** @brief 空载检测开始时间戳（毫秒） */
 static uint64_t auto_unload_empty_t0_ms[4]  = {0ull,0ull,0ull,0ull};
 
-bool filament_channel_inserted[4]       = {false, false, false, false}; // czy kanał fizycznie wpięty
+/** @brief 各通道是否物理插入（true=已插入，ADC 0.3V~3.0V） */
+bool filament_channel_inserted[4]       = {false, false, false, false};
 
+/** @brief PID 压力控制器P增益（25.0） */
 static constexpr float MC_PULL_PIDP_PCT = 25.0f;
 
+/** @brief 低压力死区下界（30%）：低于此值状态=-1 */
 static constexpr int MC_PULL_DEADBAND_PCT_LOW  = 30;
+/** @brief 高压力死区上界（70%）：高于此值状态=1 */
 static constexpr int MC_PULL_DEADBAND_PCT_HIGH = 70;
 
-// ================ LOAD CONTROL ======================
+/* ==================== 进料控制参数（按打印机型号区分） ====================== */
+/**
+ * 进料控制参数 —— 根据打印机型号选择不同参数组
+ * BMCU_SOFT_LOAD=A1 Mini, BMCU_P1S=P1S, 默认=A1
+ * Stage1:快速进料, Stage2:保持, ON_USE:打印中压力控制
+ */
 #if BMCU_SOFT_LOAD
-    // Stage1
-    static constexpr int   MC_LOAD_S1_FAST_PCT       = 75;
-    static constexpr int   MC_LOAD_S1_HARD_STOP_PCT  = 90;  // bezpiecznik
-    static constexpr int   MC_LOAD_S1_HARD_HYS       = 2;   // wróć dopiero < (HARD_STOP - HYS)
-    // Stage2 (hold_load)
-    static constexpr float MC_LOAD_S2_HOLD_TARGET_PCT    = 75.0f;
-    static constexpr float MC_LOAD_S2_HOLD_BAND_LO_DELTA = 0.3f;   // push_hi = hold_target - delta
-    static constexpr float MC_LOAD_S2_PUSH_START_PCT     = 55.0f;  // start push PWM
-    static constexpr float MC_LOAD_S2_PWM_HI             = 480.0f;
-    static constexpr float MC_LOAD_S2_PWM_LO             = 1000.0f;
-    // ===== ON_USE CONTROL =====
-    static constexpr float MC_ON_USE_TARGET_PCT    = 52.0f;
-    static constexpr float MC_ON_USE_BAND_LO_DELTA = 0.2f;  // band_lo = target - delta
-    static constexpr float MC_ON_USE_BAND_HI_PCT   = 60.0f;
+    /* ---- A1 Mini 参数 ---- */
+    static constexpr int   MC_LOAD_S1_FAST_PCT       = 75;     /**< Stage1 快速进料百分比 */
+    static constexpr int   MC_LOAD_S1_HARD_STOP_PCT  = 90;     /**< Stage1 硬限位（安全保护） */
+    static constexpr int   MC_LOAD_S1_HARD_HYS       = 2;      /**< Stage1 硬限位滞回 */
+    static constexpr float MC_LOAD_S2_HOLD_TARGET_PCT    = 75.0f;  /**< Stage2 保持目标 */
+    static constexpr float MC_LOAD_S2_HOLD_BAND_LO_DELTA = 0.3f;   /**< Stage2 区间下界偏移 */
+    static constexpr float MC_LOAD_S2_PUSH_START_PCT     = 55.0f;  /**< Stage2 开始推料百分比 */
+    static constexpr float MC_LOAD_S2_PWM_HI             = 480.0f; /**< Stage2 推料上限PWM */
+    static constexpr float MC_LOAD_S2_PWM_LO             = 1000.0f;/**< Stage2 最大推力PWM */
+    static constexpr float MC_ON_USE_TARGET_PCT    = 52.0f;  /**< ON_USE 压力目标 */
+    static constexpr float MC_ON_USE_BAND_LO_DELTA = 0.2f;   /**< ON_USE 区间下界偏移 */
+    static constexpr float MC_ON_USE_BAND_HI_PCT   = 60.0f;  /**< ON_USE 区间上界 */
 #elif BMCU_P1S  // P1S
-    // Stage1
+    /* ---- P1S 参数 ---- */
     static constexpr int   MC_LOAD_S1_FAST_PCT       = 88;
-    static constexpr int   MC_LOAD_S1_HARD_STOP_PCT  = 97;  // bezpiecznik
-    static constexpr int   MC_LOAD_S1_HARD_HYS       = 2;   // wróć dopiero < (HARD_STOP - HYS)
-    // Stage2 (hold_load)
+    static constexpr int   MC_LOAD_S1_HARD_STOP_PCT  = 97;
+    static constexpr int   MC_LOAD_S1_HARD_HYS       = 2;
     static constexpr float MC_LOAD_S2_HOLD_TARGET_PCT    = 95.0f;
-    static constexpr float MC_LOAD_S2_HOLD_BAND_LO_DELTA = 1.0f;   // push_hi = hold_target - delta
-    static constexpr float MC_LOAD_S2_PUSH_START_PCT     = 88.0f;  // start push PWM
+    static constexpr float MC_LOAD_S2_HOLD_BAND_LO_DELTA = 1.0f;
+    static constexpr float MC_LOAD_S2_PUSH_START_PCT     = 88.0f;
     static constexpr float MC_LOAD_S2_PWM_HI             = 550.0f;
     static constexpr float MC_LOAD_S2_PWM_LO             = 1000.0f;
-    // ===== ON_USE CONTROL =====
     static constexpr float MC_ON_USE_TARGET_PCT    = 54.0f;
-    static constexpr float MC_ON_USE_BAND_LO_DELTA = 0.2f;  // band_lo = target - delta
+    static constexpr float MC_ON_USE_BAND_LO_DELTA = 0.2f;
     static constexpr float MC_ON_USE_BAND_HI_PCT   = 65.0f;
 #else        // A1
-    // Stage1
+    /* ---- A1 默认参数 ---- */
     static constexpr int   MC_LOAD_S1_FAST_PCT       = 85;
-    static constexpr int   MC_LOAD_S1_HARD_STOP_PCT  = 95;  // bezpiecznik
-    static constexpr int   MC_LOAD_S1_HARD_HYS       = 2;   // wróć dopiero < (HARD_STOP - HYS)
-    // Stage2 (hold_load)
+    static constexpr int   MC_LOAD_S1_HARD_STOP_PCT  = 95;
+    static constexpr int   MC_LOAD_S1_HARD_HYS       = 2;
     static constexpr float MC_LOAD_S2_HOLD_TARGET_PCT    = 90.0f;
-    static constexpr float MC_LOAD_S2_HOLD_BAND_LO_DELTA = 0.3f;   // push_hi = hold_target - delta
-    static constexpr float MC_LOAD_S2_PUSH_START_PCT     = 80.0f;  // start push PWM
+    static constexpr float MC_LOAD_S2_HOLD_BAND_LO_DELTA = 0.3f;
+    static constexpr float MC_LOAD_S2_PUSH_START_PCT     = 80.0f;
     static constexpr float MC_LOAD_S2_PWM_HI             = 480.0f;
     static constexpr float MC_LOAD_S2_PWM_LO             = 1000.0f;
-    // ===== ON_USE CONTROL =====
     static constexpr float MC_ON_USE_TARGET_PCT    = 52.0f;
-    static constexpr float MC_ON_USE_BAND_LO_DELTA = 0.2f;  // band_lo = target - delta
+    static constexpr float MC_ON_USE_BAND_LO_DELTA = 0.2f;
     static constexpr float MC_ON_USE_BAND_HI_PCT   = 60.0f;
 #endif
 // ====================================================
 
+/* ==================== 校准重置参数 ==================== */
+/** @brief 校准重置长按时间（5秒） */
 static constexpr uint32_t CAL_RESET_HOLD_MS     = 5000;
+/** @brief 触发校准重置的百分比阈值 */
 static constexpr int      CAL_RESET_PCT_THRESH  = 15;
+/** @brief 校准重置电压偏移容差（0.10V） */
 static constexpr float    CAL_RESET_V_DELTA     = 0.10f;
+/** @brief 校准重置最小电压容差（0.03V） */
 static constexpr float    CAL_RESET_NEAR_MIN    = 0.03f;
 
+/** @brief 当前被按住的通道号（-1=无） */
 static int      g_hold_ch = -1;
+/** @brief 按住开始时的tick时间戳 */
 static uint32_t g_hold_t0_ticks = 0;
 
-// kiedy kanał OSTATNIO wyszedł z on_use (0 = nigdy, 1 = marker "był kiedykolwiek") (patch do wersji BMCU DM przy automatycznej zmianie filamentu gdy się skończy, żeby ekstruder nie trzymał filamentu)
+/**
+ * @brief 各通道最后退出on_use的时间戳（毫秒）
+ *        0=从未进入, 1=曾经进入, 其他=实际退出时间
+ *        用于自动换料后防止挤出机继续夹持
+ */
 static uint64_t g_last_on_use_exit_ms[4] = {0,0,0,0};
 
+/** @brief 外部声明：RGB LED更新函数 */
 extern void RGB_update();
 
+/** @brief 检查所有4通道是否都无耗材 */
 static inline bool all_no_filament()
 {
     return ((MC_ONLINE_key_stu[0] | MC_ONLINE_key_stu[1] | MC_ONLINE_key_stu[2] | MC_ONLINE_key_stu[3]) == 0);
 }
 
+/** @brief 所有通道蓝色LED闪烁3秒（校准重置前视觉提示） */
 static void blink_all_blue_3s()
 {
     const uint32_t tpm = time_hw_ticks_per_ms();
@@ -352,6 +490,10 @@ static void blink_all_blue_3s()
     RGB_update();
 }
 
+/**
+ * @brief 执行校准重置并重启MCU
+ *        停止电机→蓝色闪烁3秒→清除Flash→NVIC系统复位
+ */
 static void calibration_reset_and_reboot()
 {
     for (uint8_t i = 0; i < kChCount; i++) Motion_control_set_PWM(i, 0);
@@ -363,6 +505,11 @@ static void calibration_reset_and_reboot()
     NVIC_SystemReset();
 }
 
+/**
+ * @brief 将传感器电压转换为百分比（0~100%）
+ *        分段线性映射，以1.65V为中位点：
+ *        <=1.65V: 从vmin线性映射到0%~50%, >1.65V: 从1.65V映射到50%~100%
+ */
 static float pull_v_to_percent_f(uint8_t ch, float v)
 {
     constexpr float c = 1.65f;
@@ -391,12 +538,18 @@ static float pull_v_to_percent_f(uint8_t ch, float v)
     return clampf(pos01, 0.0f, 1.0f) * 100.0f;
 }
 
+/** @brief 根据极性反转电压：当POLARITY<0时返回 3.3V - v */
 static inline float pull_v_apply_polarity(uint8_t ch, float v)
 {
     if (MC_PULL_POLARITY[ch] < 0) return 3.30f - v;
     return v;
 }
 
+/**
+ * @brief 检测4个通道是否物理插入
+ *        通过ADC读取电压，判断是否在0.3V~3.0V有效范围内
+ *        多次采样取平均提高可靠性
+ */
 void MC_PULL_detect_channels_inserted()
 {
     if (!ADC_DMA_is_inited())
@@ -431,16 +584,22 @@ void MC_PULL_detect_channels_inserted()
     }
 }
 
+/** @brief 初始化ADC传感器读取（插入检测+电压读取） */
 static inline void MC_PULL_ONLINE_init()
 {
     MC_PULL_detect_channels_inserted();
 }
 
+/**
+ * @brief 读取ADC传感器数据，更新各通道电压/百分比/状态
+ *        从DMA缓冲区读取8通道数据（4速度传感器+4微动开关）
+ *        双微动开关模式下额外检测Buffer Gesture Load手势
+ */
 static inline void MC_PULL_ONLINE_read(uint32_t now_ticks)
 {
     const float *data = ADC_DMA_get_value();
 
-    // mapowanie ADC -> kanały
+    /* 映射 ADC 通道 -> 耗材通道（交错排列：偶数=速度传感器，奇数=微动开关） */
     MC_PULL_stu_raw[3] = pull_v_apply_polarity(3u, data[0] + MC_PULL_V_OFFSET[3]);
     const float key3   = data[1];
 
@@ -456,7 +615,10 @@ static inline void MC_PULL_ONLINE_read(uint32_t now_ticks)
 #if BMCU_DM_TWO_MICROSWITCH
     const float keyv[4] = { key0, key1, key2, key3 };
 
-    // --- Buffer Gesture Load  ---
+    /* --- Buffer Gesture Load（缓冲手势加载检测）---
+     * 检测耗材插入的手势序列：空闲→低电压→恢复→中位确认
+     * 防止误触发自动加载
+     */
     static uint32_t gst_t0_ticks[4]     = {0,0,0,0};
     static uint8_t  gst_step[4]         = {0,0,0,0};      // 0=idle, 1=wait_low, 2=wait_return
     static bool     gst_active[4]       = {false,false,false,false};
@@ -531,9 +693,9 @@ static inline void MC_PULL_ONLINE_read(uint32_t now_ticks)
 
         MC_ONLINE_key_stu[i] = state;
     }
-    // --- End Buffer Gesture Load  ---
+    /* --- End Buffer Gesture Load --- */
 #else
-    // online key: tylko jeśli kanał fizycznie wpięty
+    /* 简单模式：仅根据微动开关电压判断在线（>1.7V=在线） */
     MC_ONLINE_key_stu[3] = (filament_channel_inserted[3] && (key3 > 1.7f)) ? 1u : 0u;
     MC_ONLINE_key_stu[2] = (filament_channel_inserted[2] && (key2 > 1.7f)) ? 1u : 0u;
     MC_ONLINE_key_stu[1] = (filament_channel_inserted[1] && (key1 > 1.7f)) ? 1u : 0u;
@@ -541,11 +703,12 @@ static inline void MC_PULL_ONLINE_read(uint32_t now_ticks)
 #endif
 
 
+    /* 更新各通道百分比和状态 */
     for (uint8_t i = 0; i < kChCount; i++)
     {
         const bool ins = filament_channel_inserted[i];
 
-        // jeśli kanał nie jest wpięty -> neutral
+        /* 未插入通道 → 重置为中位状态 */
         if (!ins)
         {
             MC_ONLINE_key_stu[i] = 0;
@@ -563,12 +726,13 @@ static inline void MC_PULL_ONLINE_read(uint32_t now_ticks)
         if (pct > 100) pct = 100;
         MC_PULL_pct[i] = (uint8_t)pct;
 
-        if      (pct > MC_PULL_DEADBAND_PCT_HIGH) MC_PULL_stu[i] = 1;
-        else if (pct < MC_PULL_DEADBAND_PCT_LOW)  MC_PULL_stu[i] = -1;
-        else                                      MC_PULL_stu[i] = 0;
+    /* 基于死区阈值判断压力状态 */
+    if      (pct > MC_PULL_DEADBAND_PCT_HIGH) MC_PULL_stu[i] = 1;
+    else if (pct < MC_PULL_DEADBAND_PCT_LOW)  MC_PULL_stu[i] = -1;
+    else                                      MC_PULL_stu[i] = 0;
     }
 
-    // pressure do hosta (tylko dla aktywnego kanału)
+    /* 将当前活跃通道的压力值上报给打印机 */
     auto &A = ams[motion_control_ams_num];
     const uint8_t num = A.now_filament_num;
 
@@ -584,14 +748,20 @@ static inline void MC_PULL_ONLINE_read(uint32_t now_ticks)
     }
 }
 
-// ===== zapis kierunku silników + progow DM key =====
+/* ==================== Flash 保存/读取 ==================== */
+
+/**
+ * @brief 运动控制校准数据保存结构体
+ *        存储电机方向和双微动开关阈值到Flash
+ */
 struct alignas(4) Motion_control_save_struct
 {
-    int Motion_control_dir[4];
-    uint32_t check;
-    uint8_t dm_key_none_cv[4];
+    int Motion_control_dir[4];       /**< 各通道电机方向（+1或-1） */
+    uint32_t check;                  /**< 校验和（0x40614061=有效） */
+    uint8_t dm_key_none_cv[4];       /**< "无料"阈值（centi-volt格式） */
 } Motion_control_data_save;
 
+/** @brief 设置保存数据的默认值（方向=0未校准, 阈值=60 centi-volt） */
 static inline void Motion_control_defaults()
 {
     for (uint8_t i = 0; i < kChCount; i++)
@@ -603,6 +773,7 @@ static inline void Motion_control_defaults()
     Motion_control_data_save.check = 0x40614061u;
 }
 
+/** @brief 将保存的校准数据应用到运行时变量 */
 static inline void Motion_control_apply_saved()
 {
     for (uint8_t i = 0; i < kChCount; i++)
@@ -614,6 +785,7 @@ static inline void Motion_control_apply_saved()
     }
 }
 
+/** @brief 从Flash读取校准数据，失败或校验不匹配时用默认值 */
 static inline bool Motion_control_read()
 {
     Motion_control_defaults();
@@ -635,6 +807,7 @@ static inline bool Motion_control_read()
     return true;
 }
 
+/** @brief 将校准数据保存到Flash */
 static inline bool Motion_control_save()
 {
     Motion_control_data_save.check = 0x40614061u;
@@ -649,6 +822,7 @@ static inline bool Motion_control_save()
     return Flash_Motion_write(&Motion_control_data_save, (uint16_t)sizeof(Motion_control_save_struct));
 }
 
+/** @brief 保存双微动开关"无料"阈值到Flash（合并现有数据） */
 bool Motion_control_save_dm_key_none_thresholds(void)
 {
     float thr[4];
@@ -662,27 +836,37 @@ bool Motion_control_save_dm_key_none_thresholds(void)
 
     return Motion_control_save();
 }
-// ===== PID =====
+
+/* ==================== PID 控制器 ==================== */
+
+/**
+ * @class MOTOR_PID
+ * @brief 增量式PID控制器，用于电机速度/压力闭环控制
+ *        output = P*error + ∫(I*error*dt) + D*(error-last_error)/dt
+ *        带积分抗饱和和输出限幅
+ */
 class MOTOR_PID
 {
-    float P = 0;
-    float I = 0;
-    float D = 0;
-    float I_save = 0;
-    float E_last = 0;
+    float P = 0;        /**< 比例增益 */
+    float I = 0;        /**< 积分增益 */
+    float D = 0;        /**< 微分增益 */
+    float I_save = 0;   /**< 积分累积值（带抗饱和） */
+    float E_last = 0;   /**< 上次误差（微分用） */
 
-    float pid_MAX = PWM_lim;
-    float pid_MIN = -PWM_lim;
-    float pid_range = (pid_MAX - pid_MIN) * 0.5f;
+    float pid_MAX = PWM_lim;    /**< 输出上限 */
+    float pid_MIN = -PWM_lim;   /**< 输出下限 */
+    float pid_range = (pid_MAX - pid_MIN) * 0.5f;  /**< 积分抗饱和范围 */
 
 public:
     MOTOR_PID() = default;
 
+    /** @brief 构造函数，使用指定PID参数初始化 */
     MOTOR_PID(float P_set, float I_set, float D_set)
     {
         init_PID(P_set, I_set, D_set);
     }
 
+    /** @brief 初始化PID参数并清零状态 */
     void init_PID(float P_set, float I_set, float D_set)
     {
         P = P_set;
@@ -692,6 +876,7 @@ public:
         E_last = 0;
     }
 
+    /** @brief 计算PID输出（带积分抗饱和和输出限幅） */
     float caculate(float E, float time_E)
     {
         I_save += I * E * time_E;
@@ -711,6 +896,7 @@ public:
         return out;
     }
 
+    /** @brief 清零积分和微分历史（状态切换时调用） */
     void clear()
     {
         I_save = 0;
@@ -718,64 +904,71 @@ public:
     }
 };
 
+/* ==================== 运动状态枚举 ==================== */
+
+/**
+ * @brief 电机运动模式枚举（9种工作模式）
+ */
 enum class filament_motion_enum
 {
-    filament_motion_send,
-    filament_motion_redetect,
-    filament_motion_pull,
-    filament_motion_stop,
-    filament_motion_before_on_use,
-    filament_motion_stop_on_use,
-    filament_motion_pressure_ctrl_on_use,
-    filament_motion_pressure_ctrl_idle,
-    filament_motion_before_pull_back,
+    filament_motion_send,                   /**< 送丝：BMCU→打印头 */
+    filament_motion_redetect,               /**< 重新检测：耗材脱离后重新推入 */
+    filament_motion_pull,                   /**< 回退：打印头→BMCU */
+    filament_motion_stop,                   /**< 停止 */
+    filament_motion_before_on_use,          /**< 打印前准备：维持适当压力 */
+    filament_motion_stop_on_use,            /**< 打印中停止 */
+    filament_motion_pressure_ctrl_on_use,   /**< 打印中压力控制（PID持续调节） */
+    filament_motion_pressure_ctrl_idle,     /**< 空闲时压力控制 */
+    filament_motion_before_pull_back,       /**< 回退前准备：先释放压力 */
 };
 
 
+/* ==================== 电机控制类 ==================== */
 
-// ===== Motor control =====
+/**
+ * @class _MOTOR_CONTROL
+ * @brief 单通道电机控制器，封装完整运动控制逻辑
+ *        包含：运动状态机、速度/压力PID、PWM输出、堵转检测、安全联锁
+ */
 class _MOTOR_CONTROL
 {
 public:
-    filament_motion_enum motion = filament_motion_enum::filament_motion_stop;
-    int CHx = 0;
+    filament_motion_enum motion = filament_motion_enum::filament_motion_stop; /**< 当前运动模式 */
+    int CHx = 0;                     /**< 通道编号（0..3） */
+    uint8_t pwm_zeroed = 1;          /**< PWM是否已归零（1=已停止） */
+    uint64_t motor_stop_time = 0;    /**< 自动停止时间戳（毫秒），0=不自动停 */
+    float    post_sendout_retract_thresh_pct = -1.0f; /**< 送丝后回退阈值百分比 */
+    uint8_t  retract_hys_active = 0;  /**< 回退滞回状态（防频繁切换） */
+    float    on_use_hi_gate_pct = -1.0f; /**< on_use高压力门控百分比 */
+    uint64_t on_use_hi_gate_t0_ms = 0ull; /**< 门控开始时间戳 */
+    uint64_t send_start_ms = 0;      /**< 送丝开始时间（毫秒） */
+    float    send_start_m  = 0.0f;   /**< 送丝起始位置（米） */
+    uint8_t  send_len_abort = 0;     /**< 送丝超长中止（>10米急停） */
+    uint64_t pull_start_ms = 0;      /**< 回退开始时间（毫秒） */
+    bool send_stop_latch = false;    /**< 送丝停止锁存（达到FAST_PCT后锁定） */
+    MOTOR_PID PID_speed    = MOTOR_PID(2, 20, 0);   /**< 速度PID（P=2,I=20,D=0） */
+    MOTOR_PID PID_pressure = MOTOR_PID(MC_PULL_PIDP_PCT, 0, 0); /**< 压力PID（P=25,纯比例） */
+    float pwm_zero = 500;           /**< 空闲基础PWM（克服静摩擦） */
+    float dir = 0;                  /**< 电机方向（+1.0/-1.0，由校准确定） */
+    static float x_prev[4];         /**< 上次PWM输出（所有通道共用，斜率限制） */
+    bool  send_hard = false;        /**< 硬限位触发标志 */
 
-    uint8_t pwm_zeroed = 1;
-
-    uint64_t motor_stop_time = 0;
-
-    float    post_sendout_retract_thresh_pct = -1.0f;
-    uint8_t  retract_hys_active = 0;
-    float    on_use_hi_gate_pct = -1.0f;
-    uint64_t on_use_hi_gate_t0_ms = 0ull;
-
-    uint64_t send_start_ms = 0;
-    float    send_start_m  = 0.0f;
-    uint8_t  send_len_abort = 0;
-
-    uint64_t pull_start_ms = 0;
-
-    bool send_stop_latch = false;
-
-    MOTOR_PID PID_speed    = MOTOR_PID(2, 20, 0);
-    MOTOR_PID PID_pressure = MOTOR_PID(MC_PULL_PIDP_PCT, 0, 0);
-
-    float pwm_zero = 500;
-    float dir = 0;
-
-    static float x_prev[4];
-
-    bool  send_hard = false;
-
+    /** @brief 构造函数 */
     _MOTOR_CONTROL(int _CHx) : CHx(_CHx) {}
 
+    /** @brief 设置空闲基础PWM值 */
     void set_pwm_zero(float _pwm_zero) { pwm_zero = _pwm_zero; }
 
+    /** @brief 设置运动模式（使用当前时间） */
     void set_motion(filament_motion_enum _motion, uint64_t over_time)
     {
         set_motion(_motion, over_time, time_ms_fast());
     }
 
+    /**
+     * @brief 设置运动模式（指定时间戳）
+     *        执行状态切换初始化：清零PID、设置停止时间、管理on_use时间戳
+     */
     void set_motion(filament_motion_enum _motion, uint64_t over_time, uint64_t time_now)
     {
         motor_stop_time = (_motion == filament_motion_enum::filament_motion_stop) ? 0 : (time_now + over_time);
@@ -916,8 +1109,13 @@ public:
         }
     }
 
+    /** @brief 获取当前运动模式 */
     filament_motion_enum get_motion() { return motion; }
 
+    /**
+     * @brief 保持进料压力控制（Stage2/hold_load通用）
+     *        压力>阈值：滞回回退, 压力在推料区：线性推料, 正常：停止
+     */
     static inline void hold_load(
         float pct,
         float dir,
@@ -999,6 +1197,13 @@ public:
         }
     }
 
+    /**
+     * @brief 电机控制主运行函数（每通道每循环调用一次）
+     *        根据运动模式执行：stop/send/pull/on_use/idle等控制逻辑
+     *        包含：软启动、硬限位保护、堵转检测、PWM斜率限制
+     * @param time_E 时间步长（秒）
+     * @param now_ms 当前时间（毫秒）
+     */
     void run(float time_E, uint64_t now_ms)
     {
         if (motion == filament_motion_enum::filament_motion_stop &&
@@ -1967,9 +2172,16 @@ public:
     }
 };
 
+/** @brief 4通道电机控制器实例数组 */
 _MOTOR_CONTROL MOTOR_CONTROL[4] = {_MOTOR_CONTROL(0), _MOTOR_CONTROL(1), _MOTOR_CONTROL(2), _MOTOR_CONTROL(3)};
+/** @brief 各通道上次PWM输出值（用于斜率限制） */
 float _MOTOR_CONTROL::x_prev[4] = {0,0,0,0};
 
+/**
+ * @brief 设置指定通道电机PWM输出
+ *        正PWM=set1有效(正转), 负PWM=set2有效(反转), 0=制动(两侧高电平)
+ *        CH3→TIM2, CH2→TIM3, CH1→TIM4(CH1/CH2), CH0→TIM4(CH3/CH4)
+ */
 void Motion_control_set_PWM(uint8_t CHx, int PWM)
 {
     uint16_t set1 = 0, set2 = 0;
@@ -2001,9 +2213,16 @@ void Motion_control_set_PWM(uint8_t CHx, int PWM)
     }
 }
 
-// ===== AS5600 distance/speed =====
+/* ==================== AS5600 距离/速度计算 ==================== */
+
+/** @brief 各通道AS5600原始角度累计值（差分计算速度用） */
 int32_t as5600_distance_save[4] = {0,0,0,0};
 
+/**
+ * @brief 更新AS5600编码器数据，计算各通道速度和累计位移
+ *        执行频率：每毫秒一次（min_poll_ticks限流）
+ *        功能：读取角度→差分计算→转换为mm和mm/s→更新传感器健康→累加位移
+ */
 void AS5600_distance_updata(uint32_t now_ticks)
 {
     static uint32_t last_ticks = 0u;
@@ -2093,20 +2312,27 @@ void AS5600_distance_updata(uint32_t now_ticks)
     }
 }
 
-// ===== stany logiki filamentu =====
+/* ==================== 耗材运动状态枚举 ==================== */
+
+/**
+ * @brief 耗材当前物理位置状态
+ *        idle→sending_out→using→before_pull_back→pulling_back→redetect→idle
+ */
 enum filament_now_position_enum
 {
-    filament_idle,
-    filament_sending_out,
-    filament_using,
-    filament_before_pull_back,
-    filament_pulling_back,
-    filament_redetect,
+    filament_idle,                /**< 空闲，耗材在BMCU内 */
+    filament_sending_out,         /**< 正在送丝 */
+    filament_using,               /**< 打印中 */
+    filament_before_pull_back,    /**< 回退前准备（释放压力） */
+    filament_pulling_back,        /**< 正在回退 */
+    filament_redetect,            /**< 重新检测（回退后推入确认） */
 };
 
+/** @brief 各通道的当前耗材位置状态 */
 static filament_now_position_enum filament_now_position[4];
+/** @brief 回退起始位置（米），用于计算回退距离 */
 static float filament_pull_back_meters[4];
-
+/** @brief 各通道回退目标距离（米），默认 motion_control_pull_back_distance */
 static float filament_pull_back_target[4] = {
     motion_control_pull_back_distance,
     motion_control_pull_back_distance,
@@ -2114,11 +2340,19 @@ static float filament_pull_back_target[4] = {
     motion_control_pull_back_distance
 };
 
-// BEFORE_PULLBACK: zapis realnie "wycofanej" drogi (m) (sumowanie całego wycofania)
+/** @brief 回退前准备阶段：上次耗材位置（米） */
 static float  before_pb_last_m[4]      = {0,0,0,0};
+/** @brief 回退前准备阶段：已回退累计距离（米） */
 static float  before_pb_retracted_m[4] = {0,0,0,0};
+/** @brief 回退方向标志（+1=正向, -1=反向, 0=未确定） */
 static int8_t before_pb_sign[4]        = {0,0,0,0};
 
+/**
+ * @brief 处理回退和重新检测运动序列
+ *        回退阶段：动态速度拉回目标距离
+ *        重新检测阶段：推入确认是否到位
+ * @return true=仍有通道在执行, false=全部完成
+ */
 static bool motor_motion_filamnet_pull_back_to_online_key(uint64_t time_now)
 {
     bool wait = false;
@@ -2198,6 +2432,11 @@ static bool motor_motion_filamnet_pull_back_to_online_key(uint64_t time_now)
     return wait;
 }
 
+/**
+ * @brief 运动状态切换主函数
+ *        根据打印机命令(A.filament[i].motion)切换内部状态机
+ *        支持: before_on_use, stop_on_use, send_out, pull_back, on_use, idle等
+ */
 static void motor_motion_switch(uint64_t time_now)
 {
     auto &A = ams[motion_control_ams_num];
@@ -2381,6 +2620,7 @@ static void motor_motion_switch(uint64_t time_now)
     }
 }
 
+/** @brief 应用基线状态灯颜色（空闲时根据通道状态显示颜色） */
 static inline void stu_apply_baseline(int error, uint64_t now_ms)
 {
     for (uint8_t i = 0; i < kChCount; i++)
@@ -2424,6 +2664,10 @@ static inline void stu_apply_baseline(int error, uint64_t now_ms)
 }
 
 
+/**
+ * @brief 电机运动主运行函数
+ *        处理DM自动加载、时间步长计算、状态切换、PID控制、PWM输出、自动卸料、LED
+ */
 static void motor_motion_run(int error, uint64_t time_now, uint32_t now_ticks)
 {
 #if BMCU_DM_TWO_MICROSWITCH
@@ -2726,6 +2970,10 @@ static void motor_motion_run(int error, uint64_t time_now, uint32_t now_ticks)
     }
 }
 
+/**
+ * @brief 运动控制主循环函数（每次主循环调用一次）
+ *        读取传感器→更新AS5600→处理脱料→校准重置检测→执行运动→输出LED
+ */
 void Motion_control_run(int error)
 {
     const uint64_t now_ticks64 = time_ticks64();
@@ -2844,7 +3092,13 @@ void Motion_control_run(int error)
     }
 }
 
-// ===== PWM init =====
+/* ==================== PWM 硬件初始化 ==================== */
+
+/**
+ * @brief 初始化PWM输出硬件
+ *        配置TIM2/TIM3/TIM4为PWM模式，设置GPIO引脚复用功能
+ *        PWM频率=72MHz/(999+1)/(1+1)=36kHz，占空比0~1000对应0~100%
+ */
 void MC_PWM_init()
 {
     GPIO_InitTypeDef GPIO_InitStructure;
@@ -2921,7 +3175,7 @@ void MC_PWM_init()
     TIM_Cmd(TIM4, ENABLE);
 }
 
-// różnica kątów
+/** @brief 计算两个AS5600角度值的差值（处理0/4096跨越） */
 static inline int M5600_angle_dis(int16_t angle1, int16_t angle2)
 {
     int d = (int)angle1 - (int)angle2;
@@ -2930,7 +3184,11 @@ static inline int M5600_angle_dis(int16_t angle1, int16_t angle2)
     return d;
 }
 
-// test kierunku silników
+/**
+ * @brief 电机方向校准测试
+ *        给每个未校准通道施加正向PWM，通过AS5600检测旋转方向
+ *        确定dir=+1或-1并保存到Flash
+ */
 static void MOTOR_get_dir()
 {
     int  dir[4]     = {0,0,0,0};
@@ -3040,7 +3298,7 @@ static void MOTOR_get_dir()
     }
 }
 
-// init motorów
+/** @brief 电机初始化：初始化PWM→校准方向→设置默认参数 */
 static void MOTOR_init()
 {
     MC_PWM_init();
@@ -3057,6 +3315,11 @@ static void MOTOR_init()
     }
 }
 
+/**
+ * @brief 运动控制模块总初始化
+ *        读取Flash校准→初始化ADC→初始化AS5600→初始化电机
+ *        设置AMS在线状态、初始化DM自动加载状态、建立初始编码器基准
+ */
 void Motion_control_init()
 {
     auto &A = ams[motion_control_ams_num];

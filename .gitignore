@@ -1,0 +1,5 @@
+.pio/
+.vscode/
+*.map
+*.lst
+*.debug.lst

@@ -1,50 +1,50 @@
- ____  __  __   ____  _   _
+ ____  __  __   ____  _   _ 
 | __ )|  \/  | / ___|| | | |
 |  _ \| |\/| || |    | | | |
 | |_) | |  | || |___ | |_| |
 |____/|_|  |_| \____| \___/
 
 
-Which variant should I choose?
-Choose between: FILAMENT_RGB_ON and FILAMENT_RGB_OFF.
+选择哪种模式？
+可选：FILAMENT_RGB_ON（耗材 LED 显示）和 FILAMENT_RGB_OFF（关闭 LED 显示）
 
-FILAMENT_RGB_ON
-- After a filament is loaded, the front LED (per channel) lights up in the selected filament color.
-- The LED still reacts to buffer status (pressure) as usual.
+FILAMENT_RGB_ON —— 耗材颜色 LED 显示
+- 耗材加载后，该通道前方的 LED 会显示对应耗材的颜色。
+- LED 仍然会正常响应缓冲状态（压力变化）。
 
-FILAMENT_RGB_OFF
-- Filament color display is disabled.
-- The front LED only indicates buffer status:
-  - centered/neutral position (when no filament is loaded),
-  - buffer extremes (too much / too little pressure).
-
-
---------------------------------------------------------------------------
-
-
-How FILAMENT_RGB_ON works
-
-- When the firmware considers the filament "loaded" on a channel, the front LED for that channel is set
-  to the filament color reported/stored for that slot.
-- RGB LEDs can vary between modules: each LED may have different brightness balance for Red/Green/Blue,
-  so the same filament color may look slightly different on different channels/modules.
-- The colors can be quite bright, which may be distracting (especially at night in a room).
-  If you want a calm/no-light setup, choose FILAMENT_RGB_OFF instead.
-
-No other behavior changes - this option only affects the front LED.
+FILAMENT_RGB_OFF —— 关闭耗材颜色显示
+- 耗材颜色显示功能关闭。
+- 前方 LED 仅指示缓冲状态：
+  - 居中/中立位置（无耗材加载时）
+  - 缓冲极端位置（压力过大/过小）
 
 
 --------------------------------------------------------------------------
 
 
-[::] All modifications by Pawel Jarczak
-[::] Also thanks to everyone on Reddit who tested this firmware on many different BMCU 370C builds.
-[::] Special thanks to Remote-Trash4593 (Reddit) for the huge effort: extensive testing + detailed documentation.
+FILAMENT_RGB_ON 工作原理
 
-[::] May compatibility with BambuLab last as long as possible.
-[::] If they ever block this last lifeboat:
-[::] - We should sell our printers and switch brands, defending our right to ownership and choice.
-[::] - When many of us bought these printers, BMCU was supported without restrictions; limits appeared only after purchase.
-[::] - BMCU was a key reason to buy; for many people AMS is too big, too expensive, and still has plenty of issues.
-[::] - The market is full of amazing 3D printers that do not lock users out - and for many of us, a 3D printer is a critical work tool.
-[::] - Open BMCU firmware gives us real freedom, and we should demand that freedom be respected.
+- 当固件判定某通道耗材已"加载"后，该通道前方的 LED 会设置为
+  该槽位配置/存储的耗材颜色。
+- RGB LED 在不同模块之间可能存在差异：每个 LED 的红/绿/蓝亮度
+  平衡可能不同，因此相同的耗材颜色在不同通道/模块上看起来可能略有差异。
+- 颜色可能比较亮，在夜间房间里可能比较刺眼。
+  如果你希望安静/无灯光的环境，请选择 FILAMENT_RGB_OFF。
+
+其他行为不变——此选项仅影响前方 LED。
+
+
+--------------------------------------------------------------------------
+
+
+[::] 所有修改由 Pawel Jarczak 完成
+[::] 感谢 Reddit 上所有在 BMCU 370C 上测试此固件的用户
+[::] 特别感谢 Remote-Trash4593 (Reddit) 的大量测试和详细文档
+
+[::] 愿 BambuLab 的兼容性尽可能长久地维持下去。
+[::] 如果他们封锁了这最后的途径：
+[::] - 我们应该卖掉打印机并更换品牌，维护我们作为用户的所有权和选择权。
+[::] - 我们许多人购买这些打印机时，BMCU 是不受限制的；限制是在购买后才出现的。
+[::] - BMCU 是购买的关键原因；对许多人来说，AMS 太大、太贵，而且问题很多。
+[::] - 市场上有许多优秀的 3D 打印机不会限制用户——对我们许多人来说，3D 打印机是关键的工作工具。
+[::] - 开放的 BMCU 固件给了我们真正的自由，我们应该要求这种自由得到尊重。

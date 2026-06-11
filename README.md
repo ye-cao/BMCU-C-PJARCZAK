@@ -1,457 +1,443 @@
-# BMCU Firmware – Calibration and Compatibility Notes
+# BMCU 固件 —— 校准与兼容性说明
 
-This BMCU firmware has been tested and verified with the latest Bambu Lab A1 firmware.
+本 BMCU 固件已在最新的 Bambu Lab A1 固件上测试并验证通过。
 
-IMPORTANT:
-The printer must be configured as AMS, not AMS Lite.
-Using AMS Lite will cause incompatibility issues.
+重要提示：
+打印机必须配置为 **AMS**，而非 AMS Lite。
+使用 AMS Lite 会导致兼容性问题。
 
 
-<h1 align="center">Support</h1>
+<h1 align="center">支持</h1>
 
 <p align="center">
-  Bambu Lab continues tightening compatibility around BMCU, and there is a growing risk that BMCU may eventually become unusable in that ecosystem.
+  Bambu Lab 持续收紧对 BMCU 的兼容性限制，BMCU 最终有可能在该生态中完全无法使用。
 </p>
 
 <p align="center">
-  To prepare for that, I want to build BMCU support for open-source Klipper-based printers.
+  为此，我计划为基于开源 Klipper 的打印机开发 BMCU 支持。
 </p>
 
 <p align="center">
-  I am currently raising funds to buy a test printer for this work.
+  目前正在筹集资金购买测试打印机。
 </p>
 
 <p align="center">
-  The $500 goal does not need to be reached in full. If I manage to save the remaining amount myself, I will cover the rest out of my own pocket.
+  500 美元的目标不需要全部筹集到位。如果我能自行凑齐剩余部分，我会用自己的钱补上。
 </p>
 
 <p align="center">
   <a href="https://ko-fi.com/jarczakpawel/goal?g=0">
-    <img src="./banner-klipper.png" alt="Want BMCU on Klipper? Click the links below to support development." width="460">
+    <img src="./banner-klipper.png" alt="想在 Klipper 上使用 BMCU？点击下方链接支持开发。" width="460">
   </a>
 </p>
 
 <p align="center">
-  <a href="https://ko-fi.com/jarczakpawel/goal?g=0"><strong>Support on Ko-fi</strong></a>
+  <a href="https://ko-fi.com/jarczakpawel/goal?g=0"><strong>在 Ko-fi 上支持</strong></a>
   ·
-  <a href="https://revolut.me/paweqxdkx"><strong>Support via Revolut</strong></a>
+  <a href="https://revolut.me/paweqxdkx"><strong>通过 Revolut 支持</strong></a>
 </p>
 
 <p align="center">
-  Direct Revolut support avoids Ko-fi fees, so more of your contribution goes directly to the project.
+  直接通过 Revolut 支付可避免 Ko-fi 手续费，使更多捐款直接用于项目。
 </p>
 
 
-# ❗ IMPORTANT - FIRST START (V10.3+) ❗
+# ❗ 重要 - 首次启动（V10.3+） ❗
 
-At the first startup after flashing, **all channels must be empty**.
+刷入固件后首次启动时，**所有通道必须为空**。
 
-From **V10.3**, the firmware calibrates empty-channel detection during first boot.
+从 **V10.3** 开始，固件会在首次启动时校准空通道检测。
 
-If you flashed it with filament inserted:
-- remove all filament
-- hold any one buffer for about **5 seconds** to re-calibrate
+如果你在插入耗材的情况下刷入了固件：
+- 取出所有耗材
+- 按住任意一个缓冲位约 **5 秒** 重新校准
 
-# ❗ Warning for 2nd generation printers
-A lot of people make a mistake because the drawings are misleading, and it is not always clear from the diagrams whether they show the plug or the socket. As a result, Signal A and Signal B often get connected the wrong way around.
+# ❗ 二代打印机注意事项
+很多人会犯错，因为图纸具有误导性，从示意图中并不总是清楚显示的是插头还是插座。因此，Signal A 和 Signal B 经常被接反。
 
-If your BMCU is not detected by a 2nd generation printer, try swapping Signal A and Signal B - but make sure you know exactly what you are doing.
+如果你的 BMCU 未被二代打印机识别，请尝试交换 Signal A 和 Signal B——但请确保你完全清楚自己在做什么。
 
 
-# HMS WARNING STATUS
+# HMS 警告状态
 
-This firmware version **triggers an HMS warning immediately after printer startup**.
+此固件版本在**打印机启动后会立即触发 HMS 警告**。
 
-Important clarification:
-- This HMS warning **does NOT block BMCU operation**
-- It does **NOT require restarting the printer**
-- It does **NOT affect printing**
-- The printer works normally despite the warning
-- The issue is **purely visual / informational** (HMS icon only)
+重要说明：
+- 此 HMS 警告**不会阻止 BMCU 工作**
+- **不需要重启打印机**
+- **不影响打印**
+- 尽管有警告，打印机正常工作
+- 此问题**纯粹是视觉/信息性的**（仅显示 HMS 图标）
 
-At the moment, the HMS warning is known and accepted behavior in this firmware version.
+目前，此 HMS 警告是此固件版本的已知且可接受的行为。
 
-If the HMS warning in Bambu Studio annoys you:
-I made a Bambu Studio build that bypasses this specific AMS compatibility warning, so you do not see it anymore.
-Other HMS warnings will still be visible (if they happen), so HMS remains useful.
+如果 Bambu Studio 中的 HMS 警告让你困扰：
+我制作了一个修改版 Bambu Studio，可以绕过这个特定的 AMS 兼容性警告，这样你就看不到了。
+其他 HMS 警告仍然会显示（如果发生），因此 HMS 仍然有用。
 
 https://github.com/jarczakpawel/BambuStudio-BMCU
 
 ---
 
-## Supported printers
+## 支持的打印机
 
-Correct operation has been confirmed on both 1st generation and 2nd generation printers.
+已在一代和二代打印机上确认正常工作。
 
-### 1st generation printers
-Support is confirmed for 1st generation printers.
+### 一代打印机
+已确认支持一代打印机。
 
-### 2nd generation printers
-Correct operation has been confirmed on:
+### 二代打印机
+已在以下打印机上确认正常工作：
 - Bambu Lab P2S
 - Bambu Lab H2D
 
-At this point, it looks like it should work on all printers from both generations.
+目前来看，应该能兼容两代的所有打印机。
 
 ---
 
-## Download
+## 下载
 
-Please download ready-to-use firmware from the **"Releases"** section (right side of the GitHub page).
-All firmware variants are generated there together with **.txt guides** that explain which build you should choose.
+请从 **"Releases"** 部分（GitHub 页面右侧）下载即用固件。
+所有固件变体都在那里生成，并附带 **.txt 说明文档**，指导你选择哪个版本。
 
-Start by selecting the correct printer mode folder first (standard(A1) or high_force_load(P1S)), then choose AUTOLOAD / RGB / slots as usual.
+首先选择正确的打印机模式文件夹（standard(A1) 或 high_force_load(P1S)），然后按常规选择 AUTOLOAD / RGB / 槽位。
 
-## Flashing
+## 刷机
 
-To flash any version of the BMCU (USB or TTL) on:
-
+在以下系统上刷入 BMCU（USB 或 TTL）：
 - Windows
 - Linux
 - macOS
 - Android
 
-use **BMCU Flasher**:
-
+请使用 **BMCU Flasher**：
 https://github.com/jarczakpawel/BMCU-Flasher
 
-Precompiled binaries are available in the **Releases** section.
+预编译的可执行文件在 **Releases** 部分提供。
 
-The flashing process is very simple and **does not require wchisptool**.
+刷机过程非常简单，**不需要 wchisptool**。
 
-You can flash firmware in two ways:
+你可以通过两种方式刷入固件：
+- **在线刷机**：直接使用内置向导（推荐）
+  → 刷机工具会自动下载正确的固件，**无需手动下载 .bin 文件**。
+- **本地刷机**：使用你自行下载的固件文件。
 
-- **Online flashing** directly from the built-in wizard (recommended)  
-  → the flasher downloads the correct firmware automatically, so you **do not need to download any .bin files manually**.
+刷机工具还支持 **Android**，你甚至可以直接用**手机**刷入 BMCU 🙂
 
-- **Local flashing** using a firmware file you downloaded yourself.
-
-The flasher also supports **Android**, so you can even flash the BMCU directly from your **phone** 🙂
-
-IMPORTANT:
-- Do **NOT** flash the BMCU while it is connected to the printer.
-- Do **NOT** connect or disconnect the BMCU while the printer is powered on (risk of damaging the BMCU and/or the printer mainboard).
+重要提示：
+- 刷入 BMCU 时**不要**连接打印机。
+- 打印机开机时**不要**连接或断开 BMCU（有损坏 BMCU 和/或打印机主板的风险）。
 
 ---
 
-## SOLO firmware
+## SOLO 固件
 
-Example file:
+示例文件：solo_0.095f.bin
 
-solo_0.095f.bin
-
-This firmware is intended for single BMCU (SOLO) operation.
-
-- Recommended for single-BMCU setups
-- Filament retraction length: 9.5 cm
+此固件用于单 BMCU 独立工作。
+- 推荐用于单 BMCU 配置
+- 耗材回退长度：9.5 厘米
 
 ---
 
-## Filament retraction explanation
+## 耗材回退长度说明
 
-Filament retraction must be calculated from the end of the AMS splitter inside the printer
-(the plastic AMS part where four PTFE tubes enter).
+回退长度必须从打印机内部 AMS 分流器末端开始计算
+（即 AMS 塑料件中四根 PTFE 管进入的那个位置）。
 
-Example:
+示例：
+- BMCU 到 AMS 分流器末端的距离：约 9.0 厘米
+- SOLO 固件回退约 9.5 厘米，超出分流器约 0.5 厘米
 
-- Distance from BMCU to the end of the AMS splitter: approximately 9.0 cm
-- SOLO firmware retracts the filament about 0.5 cm past the splitter
-- Total retraction length: 9.5 cm
-
-When calculating your own retraction length:
-
-- Always measure from the end of the AMS splitter
-- Add the required distance plus approximately 9 cm, depending on your setup
+计算你自己的回退长度时：
+- 始终从 AMS 分流器末端开始测量
+- 加上所需距离，再加上约 9 厘米（取决于你的配置）
 
 ---
 
-## AMS_A / AMS_B / AMS_C / AMS_D firmware
+## AMS_A / AMS_B / AMS_C / AMS_D 固件
 
-These firmware versions are intended for:
+这些固件版本适用于：
+- 多 BMCU 配置
+- 更长的耗材回退距离
 
-- Multi-BMCU setups
-- Longer filament retraction distances
-
-If you want to use SOLO mode with a longer retraction, use AMS_A instead of SOLO.
+如果你想要使用 SOLO 模式但需要更长的回退距离，请使用 AMS_A 代替 SOLO。
 
 ---
 
-## Calibration (first start)
+## 校准（首次启动）
 
-Correct calibration is mandatory.
-Without proper calibration, BMCU will not work correctly.
+正确的校准是必须的。
+没有正确的校准，BMCU 无法正常工作。
 
-The calibration process is shown in the following video:
-
+校准过程请参考以下视频：
 https://www.youtube.com/watch?v=Hn_DNzSmhuc
 
-Follow the calibration steps shown in the video carefully.
+请仔细按照视频中的校准步骤操作。
 
 ---
 
-## Re-calibration
+## 重新校准
 
-You can recalibrate the BMCU at any time.
+你可以随时重新校准 BMCU。
 
-Steps:
-
-1. Remove all filaments from all channels
-2. Hold any one buffer in position for approximately 5 seconds
-
----
-
-## Safety and usage notes
-
-- Do not flash BMCU while it is connected to the printer
-- Do not disconnect BMCU while the printer is powered on
-- Do not update printer firmware while BMCU is connected
-- Connect/disconnect the BMCU ONLY when the printer is completely powered off (unplugged). Doing this while powered can damage the BMCU and/or the printer mainboard.
-
-These recommendations are based on community reports.
-Not all failure scenarios have been tested.
-
-Changing the printer mode from AMS Lite to AMS while BMCU was connected did not cause issues in testing, but this is not recommended.
+步骤：
+1. 从所有通道取出所有耗材
+2. 按住任意一个缓冲位约 5 秒
 
 ---
 
-## Disclaimer
+## 安全与使用须知
 
-You are using this firmware and performing any modifications at your own risk.
-Make sure you understand what you are doing.
-I am not responsible for any damage, failed prints, hardware issues, or data loss.
+- 刷入 BMCU 时不要连接打印机
+- 打印机开机时不要断开 BMCU
+- BMCU 连接时不要更新打印机固件
+- 只在打印机完全关机（拔掉电源）时连接/断开 BMCU。带电操作可能损坏 BMCU 和/或打印机主板。
 
----
+这些建议基于社区反馈。
+并非所有故障场景都经过测试。
 
-## Before opening a bug report
-
-Please verify the basics first:
-
-- Make sure you flashed the correct firmware variant and followed the flashing tutorial correctly.
-- Make sure you really have **BMCU 370C with Hall sensors**.
-    - The only reliable verification is to open the module and inspect the PCB.
-    - Some sellers mix modules and try to get rid of older **370x** boards - sometimes 1-2 modules in the set can be 370x.
-- If you have printer-side issues:
-    - confirm you are on the latest printer firmware
-    - do a factory reset (this often fixes weird AMS-related behavior)
-- If filament detection behaves strangely:
-    - boot the printer once without BMCU connected
-    - then connect BMCU and test again
-- Do a few real tests before creating a thread.
-  Printers can have unrelated issues (rare, but happens) - some users cannot even update printer firmware automatically and must do it via SD card.
-
-## Bug reports
-
-If you encounter a real bug, you may report it.
-This firmware has undergone solid testing, and no issues are expected.
+在 BMCU 连接状态下将打印机模式从 AMS Lite 切换为 AMS 在测试中未出现问题，但不建议这样做。
 
 ---
 
-# Changelog
+## 免责声明
+
+你使用此固件并进行任何修改均需自行承担风险。
+请确保你了解自己在做什么。
+我对任何损坏、打印失败、硬件问题或数据丢失不承担责任。
+
+---
+
+## 提交 Bug 报告前
+
+请先确认以下基本事项：
+- 确保你刷入了正确的固件变体，并正确按照刷机教程操作。
+- 确保你确实拥有 **BMCU 370C 带霍尔传感器版本**。
+    - 唯一可靠的验证方式是打开模块检查 PCB。
+    - 部分卖家会混装模块，尝试清理旧的 **370x** 板——有时一套中的 1-2 个模块可能是 370x。
+- 如果你遇到打印机端问题：
+    - 确认你的打印机固件已是最新版本
+    - 执行出厂重置（这通常能修复奇怪的 AMS 相关问题）
+- 如果耗材检测行为异常：
+    - 先不连接 BMCU 启动一次打印机
+    - 然后连接 BMCU 再次测试
+- 在创建帖子前先做几次实际测试。
+  打印机可能存在不相关的问题（罕见但确实发生）——有些用户甚至无法自动更新打印机固件，必须通过 SD 卡更新。
+
+## Bug 报告
+
+如果你遇到真正的 Bug，可以提交报告。
+此固件经过了充分测试，预计不会有问题。
+
+---
+
+# 更新日志
 
 ## V10.5
 
-### User-visible changes
-- Added **automatic filament unload when the buffer is lifted manually**.
-- The serial is generated from the MCU hardware UID, so devices no longer share the same SN.
-- Calibration now performs a **full NVM cleanup**.
-- Fixed the rare issue where the **system LED could blink incorrectly** on some BMCU units.
-- Fixed the **external fan issue on Bambu Lab P2S**.
+### 用户可见变更
+- 新增**手动抬起缓冲时自动卸载耗材**功能。
+- 序列号现在从 MCU 硬件 UID 生成，设备不再共享相同的 SN。
+- 校准现在会执行**完整的 NVM 清理**。
+- 修复了部分 BMCU 上**系统 LED 闪烁异常**的问题。
+- 修复了 **Bambu Lab P2S 外部风扇问题**。
 
 ## V10.4
 
-### User-visible changes
-- Added support for **Bambu Lab P2S**.
-  - Verified to work correctly in real tests.
-  - The **H2 series** will most likely also work as well, because **1st generation AMS support** is confirmed there.
+### 用户可见变更
+- 新增 **Bambu Lab P2S** 支持。
+  - 已在实际测试中确认正常工作。
+  - **H2 系列**也很可能正常工作，因为确认支持**一代 AMS**。
 
-### Fixes
-- **"filament in use"** flag is now cleared correctly when filament runs out during printing.
-- Added support for **retraction when the buffer is pulled up manually**, even when there is **no filament inside**.
+### 修复
+- **"耗材使用中"** 标志在打印时耗材用完时现在能正确清除。
+- 新增支持**缓冲被手动上拉时的回退**，即使**内部没有耗材**。
 
 ## V10.3
 
-### User-visible changes
-- Added new firmware mode: **soft_load(A1)**.
-    - Intended mainly for **A1 / A1 Mini** users.
-    - Uses lower filament loading force than **standard(A1)**.
-    - Useful for some BMCU units with weaker lever springs, where stronger loading can cause clicking / grinding during filament load.
-- Improved empty-channel detection calibration.
-    - The firmware now calibrates and stores the "no filament" detection point separately for each channel.
-    - This improves reliability on hardware variants where idle detection voltage differs between channels/modules.
-- Improved calibration behavior:
-    - calibration now also detects and saves **Hall polarity per channel**
-    - magnet polarity is automatically detected during calibration and stored, so it no longer matters which way the magnet is inserted in the buffer
+### 用户可见变更
+- 新增固件模式：**soft_load(A1)**。
+    - 主要面向 **A1 / A1 Mini** 用户。
+    - 使用比 **standard(A1)** 更低的加载力度。
+    - 适用于部分弹簧较弱的 BMCU，避免加载时产生异响/打齿。
+- 改进空通道检测校准。
+    - 固件现在会为每个通道单独校准并存储"无耗材"检测点。
+    - 提高了硬件变体间空闲检测电压差异的可靠性。
+- 改进行为：
+    - 校准现在还会检测并保存**每个通道的霍尔极性**
+    - 磁铁极性在校准期间自动检测并存储，因此磁铁安装方向不再重要
 
-### Stability and behavior improvements
-- Fixed PWM timer preload configuration on all motor channels.
-    - PWM updates are now buffered correctly before timer update events.
-- Improved AS5600 update timing.
-    - Sensor polling is now rate-limited to about **1 ms**
-    - more stable speed calculation
-    - lower unnecessary CPU load
-- Improved internal timing paths by reusing shared tick snapshots in the main motion loop.
-    - less timing jitter
-    - more consistent runtime behavior
-- Improved high-load / jam timing logic during on_use.
-    - high PWM accumulation now uses **microsecond precision** instead of millisecond buckets
-- Improved motion loop time-step handling.
-    - uses wrap-safe tick delta
-    - clamps oversized time steps
-    - avoids running motor control with invalid zero-step timing
+### 稳定性与行为改进
+- 修复所有电机通道的 PWM 定时器预加载配置。
+    - PWM 更新现在在定时器更新事件前正确缓冲。
+- 改进 AS5600 更新时序。
+    - 传感器轮询限速约 **1 ms**
+    - 更稳定的速度计算
+    - 更低的不必要 CPU 负载
+- 通过在主运动循环中复用共享时钟快照改进内部时序路径。
+    - 更低的时序抖动
+    - 更一致的运行时行为
+- 改进高负载/卡料时的 on_use 阶段时序逻辑。
+    - 高 PWM 累积现在使用**微秒精度**而非毫秒级
+- 改进运动循环时间步处理。
+    - 使用防溢出的时钟增量
+    - 钳位过大的时间步
+    - 避免在无效的零步时序下运行电机控制
 
-### Notes
-- `soft_load(A1)` is not meant as the default for everyone.
-- If filament gets rejected because push force is too weak, switch back to `standard(A1)` and use a stronger lever spring.
-- On some A1 / A1 Mini units, `soft_load(A1)` works very well and can be used permanently.
+### 备注
+- `soft_load(A1)` 不是所有人的默认选择。
+- 如果因推力不足导致耗材被拒绝，请换回 `standard(A1)` 并使用更强的弹簧。
+- 在部分 A1 / A1 Mini 上，`soft_load(A1)` 效果很好，可以长期使用。
 
 ## V10.2
 
-### User-visible changes
-- Fixed a problem where **filament run-out could incorrectly trigger a jam condition**.  
-  When filament ended, the motor could run continuously and eventually enter jam protection, which blocked the **automatic filament refill**.
-- Reworked jam protection logic:
-    - real filament jams are now detected separately from temporary motor stops
-    - high motor load alone no longer falsely triggers a jam
-- Improved flash persistence system (less unnecessary flash rewriting).
-- Improved ADC/DMA processing:
-    - faster value updates
-    - lower CPU overhead
-    - smoother runtime behavior
-- Various timing and stability improvements.
+### 用户可见变更
+- 修复了**耗材用完可能错误触发卡料条件**的问题。
+  耗材用完时，电机可能持续运行并最终进入卡料保护，阻止**自动耗材补充**。
+- 重新设计卡料保护逻辑：
+    - 真正的卡料现在与临时电机停止分开检测
+    - 仅电机高负载不再错误触发卡料
+- 改进 Flash 持久化系统（减少不必要的 Flash 重写）。
+- 改进 ADC/DMA 处理：
+    - 更快的数值更新
+    - 更低的 CPU 开销
+    - 更流畅的运行时行为
+- 多项时序和稳定性改进。
 
-### Technical changes
-- **Filament metadata flash storage redesigned.**
-    - append-only journal instead of rewriting a full flash page
-    - each record: **40 bytes (10 words)**
-    - **CRC32 validation**
-    - **6 records per flash page**
-    - page erase only when the page becomes full  
-      This significantly reduces flash wear and makes writes power-loss safe.
-- Loaded-channel persistence reworked into a lightweight **slot log** to reduce erase cycles.
-- Added **skip-if-unchanged** logic to avoid unnecessary flash writes.
-- Simplified and optimized **ADC DMA update/publish path**.
-- CRC tables moved to **static compile-time tables** (no runtime generation).
-- Cleanup of timing paths using **wrap-safe 32-bit timers**.
-- Several other smaller fixes and internal optimizations.
+### 技术变更
+- **耗材元数据 Flash 存储重新设计。**
+    - 使用追加写入日志代替完整 Flash 页重写
+    - 每条记录：**40 字节（10 个字）**
+    - **CRC32 校验**
+    - **每个 Flash 页 6 条记录**
+    - 仅在页满时才擦除
+      这显著降低了 Flash 磨损，使写入在断电时安全。
+- 已加载通道持久化重新设计为轻量级**槽位日志**，减少擦除次数。
+- 新增**未变化跳过**逻辑，避免不必要的 Flash 写入。
+- 简化并优化 **ADC DMA 更新/发布路径**。
+- CRC 表移至**静态编译时表**（无运行时生成）。
+- 使用**防溢出 32 位定时器**清理时序路径。
+- 多项其他小修复和内部优化。
 
 ## V10
 
-### User-visible changes
-- Improved spool jam handling: jam is detected immediately, the print is paused, the printer waits for you to fix the snag/tangle, then you can resume normally without ruining the print.
+### 用户可见变更
+- 改进卷轴卡料处理：卡料立即检测，暂停打印，等待你修复卡住/缠绕的问题，然后可以正常恢复而不毁掉打印。
 
-### Flash / persistence (wear + reliability)
-- State (loaded channel) persistence reworked into an append-only slot log: 8 bytes per update, up to 192 updates before any page erase (~192x fewer erase cycles vs rewriting a whole 256B page per update).
-- Filament metadata persistence reworked into a small CRC-protected log: 64B per update, 2 pages per filament (8 records) -> ~8x fewer erase cycles vs erasing a whole 256B page on every change.
-- Per-filament saves: only the modified channel is written (reduces unnecessary flash writes).
-- Power-loss safe commits: records are validated and partially-written data is ignored.
+### Flash / 持久化（磨损 + 可靠性）
+- 已加载通道状态持久化重新设计为追加写入槽位日志：每次更新 8 字节，最多 192 次更新才需要擦除一次（相比每次重写整个 256B 页减少约 192 倍擦除次数）。
+- 耗材元数据持久化重新设计为小型 CRC 保护日志：每次更新 64B，每个耗材 2 页（8 条记录）→ 相比每次更改都擦除整个 256B 页减少约 8 倍擦除次数。
+- 每个耗材单独保存：仅写入修改过的通道（减少不必要的 Flash 写入）。
+- 断电安全提交：记录经过验证，部分写入的数据会被忽略。
 
 ## V9
 
-### User-visible changes
-- Increased filament loading force for improved reliability during filament insertion.
-- Improved filament loading behavior on some materials (e.g. **Sunlu PLA+** and similar filaments) where loading characteristics differ from standard PLA/PETG.
-- Added protection against **spool jams**:
-    - Lock mode activates if the buffer drops too low during printing.
-    - Lock mode also activates if the motor runs at high speed continuously for ~8 seconds.
-    - The lock is automatically released once the buffer returns to the neutral position.
-    - Prevents prolonged motor overrun when filament movement is blocked.
+### 用户可见变更
+- 增加载材加载推力，提高耗材插入可靠性。
+- 改进部分材料的加载行为（如 **Sunlu PLA+** 及类似耗材）。
+- 新增**卷轴卡料保护**：
+    - 打印时缓冲降得过低时激活锁定模式。
+    - 电机持续高速运行约 8 秒时也激活锁定模式。
+    - 缓冲回到中立位置后自动释放锁定。
+    - 防止耗材运动受阻时电机长时间过转。
 
 ## V8
 
-### User-visible changes
-- Supported print resume after a printer power reset / power loss (printing can be resumed properly).
-- Improved behavior for **P1S** (loading problems due to long/bent PTFE path).
-- Added AUTOLOAD support for **single-switch PCB** boards:
-    - Triggered by pressing the buffer ("buffer tap").
-    - Starts filament loading exactly like the external switch trigger.
-- More stable loading process overall.
-- Improved support for **low-torque BMCU** variants.
+### 用户可见变更
+- 支持打印机断电重置/断电后恢复打印（可以正常恢复打印）。
+- 改进 **P1S** 行为（因长/弯曲 PTFE 路径导致的加载问题）。
+- 新增 **AUTOLOAD** 对**单微动开关 PCB** 的支持：
+    - 通过按压缓冲（"缓冲敲击"）触发。
+    - 与外部开关触发方式完全相同。
+- 整体加载过程更稳定。
+- 改进**低扭矩 BMCU** 变体的支持。
 
 ## V7
 
-### User-visible changes
-- **Remember loaded filaments (persistent state).**  
-  You can load filament and safely power off the printer.  
-  This allows you to disable the automatic unload-at-end behavior in G-code (if you often print with one filament),
-  keeping filament loaded until you actually need to change it.  
-  More info here: https://wiki.bambulab.com/en/ams/manual/ams-not-unloading-to-save-filament
-- **100% solved filament loading problems.** The system is stable and consistent across hardware variants.
-- **Filament RGB colors.** Modules/LEDs can display the configured filament color.
+### 用户可见变更
+- **记住已加载的耗材（持久化状态）。**
+  你可以加载耗材后安全关闭打印机。
+  这允许你在 G-code 中禁用打印结束时的自动卸载行为（如果你经常使用同一种耗材打印），
+  保持耗材加载直到你真正需要更换。
+  更多信息：https://wiki.bambulab.com/en/ams/manual/ams-not-unloading-to-save-filament
+- **100% 解决加载问题。** 系统在不同硬件变体上稳定一致。
+- **耗材 RGB 颜色。** 模块/LED 可以显示配置的耗材颜色。
 
-### AUTOLOAD (short)
-**How AUTOLOAD works**
-- **DM (two microswitches):**
-    - Touch first switch → AUTOLOAD starts (you may need a light manual push until gears grab).
-    - BMCU feeds filament until the second switch (behind extruder) confirms **fully inserted**.
-    - Then it feeds 120 mm to make it print-ready.
-    - **Anti-snag protection:** buffer position is monitored; if the filament catches on housing / PTFE edge, it retracts to safe position and retries (3 retries).
-- **Single-switch boards:**
-    - Stage 1 is manual (no second switch to confirm fully-in).
-    - Once filament is fully in the extruder, Stage 2 behaves the same (incl. anti-snag protection).
+### AUTOLOAD（简述）
+**工作原理**
+- **DM（双微动开关）：**
+    - 触发第一个开关 → AUTOLOAD 启动（可能需要手动轻推直到齿轮抓住）。
+    - BMCU 送料直到第二个开关（挤出机后方）确认**完全插入**。
+    - 然后送料 120mm 使其就绪。
+    - **防卡保护：** 监控缓冲位置；如果耗材卡在壳体/PTFE 管边缘，回退到安全位置并重试（3 次重试）。
+- **单微动开关版本：**
+    - 第一阶段手动操作（没有第二个开关确认完全插入）。
+    - 耗材完全进入挤出机后，第二阶段行为相同（包含防卡保护）。
 
-### Technical changes
-- **ADC_DMA upgraded (ADC1 + ADC2 in parallel):**
-    - Regular simultaneous mode: ADC1+ADC2 scan channels in parallel to reduce noise and increase throughput.
-    - Lower noise enabled smaller filtering and faster stable readout.
-    - Full filtered update time: **~5 ms instead of ~28 ms**.
-- **AS5600 reading correctness improved** (robustness and stability of reads).
-- **Timer/tick safety (wrap safety):** all time comparisons reviewed to be correct under wrap-around.
-- Final stabilization and cleanup: overall behavior is faster and more deterministic than previous releases.
-- There were more fixes in V7 as well; easiest is to check the commit history.
+### 技术变更
+- **ADC_DMA 升级（ADC1 + ADC2 并行）：**
+    - 常规同步模式：ADC1+ADC2 并行扫描通道，降低噪声并提高吞吐量。
+    - 更低的噪声允许使用更小的滤波窗口和更快的稳定读数。
+    - 完整滤波更新时间：**约 5ms（之前约 28ms）**。
+- **AS5600 读取正确性改进**（鲁棒性和稳定性）。
+- **定时器/时钟安全（防溢出）：** 所有时间比较都经过审查，确保在溢出时正确。
+- 最终稳定化和清理：整体行为比之前的版本更快、更确定性。
+- V7 还有更多修复；最简单的方式是查看提交历史。
 
-**Final note:** all known issues were ultimately resolved. BMCU is fully stable and significantly faster vs older firmware.
-At this moment I do not expect any further fixes.
+**最终说明：** 所有已知问题都已解决。BMCU 完全稳定，相比旧版固件明显更快。
+此时我不预期需要进一步修复。
 
 ---
 
 ## V6
 
-## Framework
-- Dropped Arduino Core (PlatformIO: framework = arduino) - the whole firmware was rewritten to pure CH32 (WCH SDK / noneos).
-- Direct use of hardware timers, DMA and interrupts - no Arduino delays, no random timing, deterministic real-time behavior.
-- Faster and correct flash operations (WCH Fast API) - stable writes, faster, without corrupting neighboring data.
+## 框架
+- 移除 Arduino Core（PlatformIO: framework = arduino）——整个固件重写为纯 CH32（WCH SDK / noneos）。
+- 直接使用硬件定时器、DMA 和中断——无 Arduino 延时，无随机时序，确定性实时行为。
+- 更快且正确的 Flash 操作（WCH Fast API）——稳定的写入，更快，不会损坏相邻数据。
 
 ## ADC_DMA
-- Separated DMA writes from CPU reads - previously reads happened while DMA was overwriting the buffer.
-- Filter is computed in the background (DMA half/full), not during readout - previously `get_value()` blocked CPU and broke timing.
-- Constant CPU load - previously larger filter window slowed the system down.
-- DMA error handling
+- 将 DMA 写入与 CPU 读取分离——之前读取和 DMA 覆盖缓冲区同时发生。
+- 滤波在后台计算（DMA 半/全完成），不在读取时——之前 `get_value()` 阻塞 CPU 并破坏时序。
+- 恒定 CPU 负载——之前更大的滤波窗口会拖慢系统。
+- DMA 错误处理
 
-## BUS (BambuBus + AHUB)
-- Fixed RX/TX buffer race (reading and overwriting the same buffer at the same time).
-- Snapshot-based parsing instead of working on a live buffer
-- Deterministic frame handling timing - constant CPU cost, independent from packet length.
-- Robustness against transmission errors - a bad packet does not break the whole system state.
+## 总线（BambuBus + AHUB）
+- 修复 RX/TX 缓冲区竞态（同时读取和覆盖同一缓冲区）。
+- 使用快照解析代替直接操作缓冲区
+- 确定性的帧处理时序——恒定 CPU 开销，与数据包长度无关。
+- 传输错误鲁棒性——一个坏数据包不会破坏整个系统状态。
 
 ## Flash / NVM
-- Flash written page-by-page (256B) instead of erasing/programming the whole sector (4KB)
-- Write only when data actually changed
-- Hardware CRC for flash + verification on read
-- AMS data split into separate records - changing one filament does not rewrite the whole structure.
+- Flash 按页（256B）写入，而非擦除/编程整个扇区（4KB）
+- 仅在数据实际更改时写入
+- 硬件 CRC 校验 Flash + 读取验证
+- AMS 数据拆分为独立记录——更改一个耗材不会重写整个结构。
 
-## Soft-I2C / AS5600
-- Rewritten from Arduino, removed timing bugs and Arduino "magic".
-- Correct ACK/NACK, START/STOP, recovery handling
-- Hard isolation of channels with errors
+## 软件 I2C / AS5600
+- 从 Arduino 重写，移除时序 Bug 和 Arduino "魔法"。
+- 正确的 ACK/NACK、START/STOP、恢复处理
+- 出错通道的硬隔离
 
-## Motion / mechanics
-- Smoother motor control
-- Added calibration buffers - filament stays in a neutral position, without unnecessary tension.
-- Better state transitions - no jerks and no sudden braking.
+## 运动 / 机械
+- 更平滑的电机控制
+- 新增校准缓冲——耗材保持在中立位置，无不必要的张力。
+- 更好的状态转换——无突变和急刹车。
 
-## Misc
-- CRC8 / CRC16 rewritten to simple C + lookup tables - faster, deterministic, no objects and no runtime init.
-- Partially de-spaghettified includes
-- and many more - firmware prepared for further development
+## 杂项
+- CRC8 / CRC16 重写为简单 C + 查找表——更快、确定性、无对象和无运行时初始化。
+- 部分解构 include 关系
+- 以及更多——固件为后续开发做好了准备
 
 
-## Final note
+## 最终说明
 
-This firmware started as a personal CH32 learning project.
-During development it grew far beyond the original scope because working on BMCU turned out to be genuinely enjoyable.
+这个固件最初是一个个人 CH32 学习项目。
+在开发过程中，它的范围远超最初的计划，因为开发 BMCU 确实非常有趣。
 
-Many solutions are intentionally overengineered.
-Everything was implemented primarily for personal use and experimentation.
+许多解决方案是刻意过度工程化的。
+所有实现主要是为了个人使用和实验。
 
-The firmware has been used extensively during development,
-and no practical issues were observed in real-world usage.
+固件在开发过程中被广泛使用，
+在实际使用中未观察到实际问题。
