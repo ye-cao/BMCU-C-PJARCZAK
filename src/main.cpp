@@ -6,7 +6,7 @@
  * 功能概览：
  * - 初始化系统时钟、GPIO、定时器
  * - 初始化 RGB LED 状态指示灯
- * - 初始化 SHT45 温湿度传感器（通过 I2C2）
+ * - 初始化通用温湿度传感器（通过 I2C2，自动检测 SHT4x/SHT3x/AHT20/Si7021/HDC1080/BME280）
  * - 初始化 AMS（自动供料系统）数据结构
  * - 初始化 Flash 存储（保存/恢复耗材参数和加载状态）
  * - 初始化 ADC/DMA（模拟量采集）
@@ -26,7 +26,7 @@
 #include "bambu_bus_ams.h"
 #include "ADC_DMA.h"
 #include "Debug_log.h"
-#include "sht45.h"
+#include "th_sensor.h"
 #include <string.h>
 
 /* 系统 RGB LED 实例（1 颗，PD1 引脚） */
@@ -286,25 +286,25 @@ void ams_datas_save_run()
 }
 
 /**
- * @brief SHT45 温湿度更新到所有耗材槽位
+ * @brief 温湿度传感器更新到所有耗材槽位
  *
- * 读取一次 SHT45 的温度和湿度，然后将结果写入当前 AMS
+ * 读取一次温湿度传感器数据，然后将结果写入当前 AMS
  * 所有 4 个耗材槽位的 compartment_temperature 和 compartment_humidity 字段。
+ * 支持自动检测：SHT4x、SHT3x、AHT20、Si7021、HDC1080、BME280。
  * 这些数据会通过 BambuBus 协议上报给打印机。
  */
-static void sht45_update_filament(void)
+static void th_sensor_update_filament(void)
 {
     float temp = 0.0f;
     float humi = 0.0f;
-    uint8_t ok_t = sht45_read_temperature(&temp);
-    uint8_t ok_h = sht45_read_humidity(&humi);
+    uint8_t ok = th_sensor_read(&temp, &humi);
 
     _ams *a = &ams[BAMBU_BUS_AMS_NUM];
     for (uint8_t i = 0; i < 4u; i++)
     {
-        if (!ok_t)
+        if (!ok)
             a->filament[i].compartment_temperature = (int8_t)(temp + 0.5f);
-        if (!ok_h)
+        if (!ok)
             a->filament[i].compartment_humidity = (uint8_t)(humi + 0.5f);
     }
 }
@@ -320,7 +320,7 @@ static void sht45_update_filament(void)
  * 3. GPIO 重映射（PD0/PD1）
  * 4. RGB LED
  * 5. 调试串口（USART3，当 Debug_log_on 启用时）
- * 6. SHT45 温湿度传感器
+ *   6. 温湿度传感器初始化（自动检测 SHT4x/SHT3x/AHT20/Si7021/HDC1080/BME280）
  * 7. AMS 数据结构
  * 8. Flash 存储
  * 9. ADC/DMA 模拟量采集
@@ -335,7 +335,7 @@ static void sht45_update_filament(void)
  * 3. 周期性保存耗材数据和加载状态
  * 4. 执行运动控制（PID 调节、送料/退料）
  * 5. 更新 RGB LED 显示
- * 6. 每 2 秒读取一次 SHT45 温湿度数据
+ *   6. 每 5 秒读取一次温湿度数据
  */
 int main(void)
 {
@@ -371,7 +371,7 @@ int main(void)
 
     /* 初始化各子系统 */
     DEBUG_init();          /* 调试串口（可选） */
-    sht45_init();          /* SHT45 温湿度传感器 */
+    th_sensor_init();       /* 温湿度传感器（自动检测类型） */
     ams_init();            /* AMS 数据结构初始化 */
     Flash_saves_init();    /* Flash 存储初始化 */
 
@@ -465,13 +465,13 @@ int main(void)
         /* 更新 RGB LED 显示 */
         RGB_update();
 
-        /* 每 5 秒读取一次 SHT45 温湿度数据并更新到耗材结构体 */
-        static uint32_t last_sht45_ms = 0;
+        /* 每 5 秒读取一次温湿度数据并更新到耗材结构体 */
+        static uint32_t last_th_ms = 0;
         uint32_t now_ms = (uint32_t)(time_ms64() & 0xFFFFFFFF);
-        if ((now_ms - last_sht45_ms) >= 5000u)
+        if ((now_ms - last_th_ms) >= 5000u)
         {
-            last_sht45_ms = now_ms;
-            sht45_update_filament();
+            last_th_ms = now_ms;
+            th_sensor_update_filament();
         }
     }
 }

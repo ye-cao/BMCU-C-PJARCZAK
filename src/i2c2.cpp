@@ -125,6 +125,14 @@ uint8_t i2c2_write(uint8_t addr7, const uint8_t *data, uint32_t len)
     I2C_Send7bitAddress(I2C2, addr7 << 1, I2C_Direction_Transmitter);
     i2c2_wait_flag(I2C_EVENT_MASTER_TRANSMITTER_MODE_SELECTED, timeout_ms);
 
+    /* 检查从机是否应答（NACK = 从机不存在） */
+    if (I2C_GetFlagStatus(I2C2, I2C_FLAG_AF))
+    {
+        I2C_GenerateSTOP(I2C2, ENABLE);
+        I2C_ClearFlag(I2C2, I2C_FLAG_AF);
+        return 1;
+    }
+
     /* 逐字节发送数据 */
     for (uint32_t i = 0; i < len; i++)
     {
@@ -175,6 +183,14 @@ uint8_t i2c2_read(uint8_t addr7, uint8_t *buf, uint32_t len)
     I2C_Send7bitAddress(I2C2, addr7 << 1, I2C_Direction_Receiver);
     i2c2_wait_flag(I2C_EVENT_MASTER_RECEIVER_MODE_SELECTED, timeout_ms);
 
+    /* 检查从机是否应答（NACK = 从机不存在） */
+    if (I2C_GetFlagStatus(I2C2, I2C_FLAG_AF))
+    {
+        I2C_GenerateSTOP(I2C2, ENABLE);
+        I2C_ClearFlag(I2C2, I2C_FLAG_AF);
+        return 1;
+    }
+
     /* 逐字节接收数据 */
     for (uint32_t i = 0; i < len; i++)
     {
@@ -185,6 +201,88 @@ uint8_t i2c2_read(uint8_t addr7, uint8_t *buf, uint32_t len)
         /* 等待数据接收完成 */
         i2c2_wait_flag(I2C_EVENT_MASTER_BYTE_RECEIVED, timeout_ms);
         buf[i] = I2C_ReceiveData(I2C2);
+    }
+
+    /* 发送停止信号 */
+    I2C_GenerateSTOP(I2C2, ENABLE);
+    return 0;
+}
+
+/**
+ * @brief I2C 主机写数据后重复 START 读数据（组合事务）
+ *
+ * @param addr7   7 位从机地址
+ * @param wdata   待写入的数据
+ * @param wlen    写入字节数
+ * @param rbuf    接收缓冲区
+ * @param rlen    期望接收的字节数
+ * @return        0=成功，1=超时/NACK/总线错误
+ *
+ * 时序：START → Addr+W → 数据 → Sr(重复START) → Addr+R → 数据 → NACK → STOP
+ * 用于 BME280 等需要写寄存器地址后重复 START 读数据的传感器。
+ */
+uint8_t i2c2_write_read(uint8_t addr7, const uint8_t *wdata, uint32_t wlen, uint8_t *rbuf, uint32_t rlen)
+{
+    uint32_t timeout_ms = 50;
+
+    /* 等待总线空闲 */
+    uint32_t t0 = time_ms64();
+    while (I2C_GetFlagStatus(I2C2, I2C_FLAG_BUSY))
+    {
+        if ((time_ms64() - t0) > timeout_ms) { i2c2_bus_reset(); return 1; }
+    }
+
+    /* 发送起始信号 */
+    I2C_GenerateSTART(I2C2, ENABLE);
+    i2c2_wait_flag(I2C_EVENT_MASTER_MODE_SELECT, timeout_ms);
+
+    /* 发送从机地址 + 写位 */
+    I2C_Send7bitAddress(I2C2, addr7 << 1, I2C_Direction_Transmitter);
+    i2c2_wait_flag(I2C_EVENT_MASTER_TRANSMITTER_MODE_SELECTED, timeout_ms);
+
+    /* 检查 NACK */
+    if (I2C_GetFlagStatus(I2C2, I2C_FLAG_AF))
+    {
+        I2C_GenerateSTOP(I2C2, ENABLE);
+        I2C_ClearFlag(I2C2, I2C_FLAG_AF);
+        return 1;
+    }
+
+    /* 逐字节发送写数据 */
+    for (uint32_t i = 0; i < wlen; i++)
+    {
+        I2C_SendData(I2C2, wdata[i]);
+        i2c2_wait_flag(I2C_EVENT_MASTER_BYTE_TRANSMITTED, timeout_ms);
+    }
+
+    /* 重复 START（Sr） */
+    I2C_GenerateSTART(I2C2, ENABLE);
+    i2c2_wait_flag(I2C_EVENT_MASTER_MODE_SELECT, timeout_ms);
+
+    /* 发送从机地址 + 读位 */
+    I2C_Send7bitAddress(I2C2, addr7 << 1, I2C_Direction_Receiver);
+    i2c2_wait_flag(I2C_EVENT_MASTER_RECEIVER_MODE_SELECTED, timeout_ms);
+
+    /* 检查 NACK */
+    if (I2C_GetFlagStatus(I2C2, I2C_FLAG_AF))
+    {
+        I2C_GenerateSTOP(I2C2, ENABLE);
+        I2C_ClearFlag(I2C2, I2C_FLAG_AF);
+        return 1;
+    }
+
+    /* 使能应答 */
+    I2C_AcknowledgeConfig(I2C2, ENABLE);
+
+    /* 逐字节接收数据 */
+    for (uint32_t i = 0; i < rlen; i++)
+    {
+        /* 最后一个字节发送 NACK */
+        if (i == rlen - 1)
+            I2C_AcknowledgeConfig(I2C2, DISABLE);
+
+        i2c2_wait_flag(I2C_EVENT_MASTER_BYTE_RECEIVED, timeout_ms);
+        rbuf[i] = I2C_ReceiveData(I2C2);
     }
 
     /* 发送停止信号 */

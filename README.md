@@ -234,6 +234,18 @@ https://www.youtube.com/watch?v=Hn_DNzSmhuc
 
 # 更新日志
 
+## V10.5.2
+
+### 用户可见变更
+- **多传感器兼容**：自动检测并支持 6 大类 I2C 温湿度传感器，无需手动配置。
+  - SHT40/41/43/45（Sensirion，地址 0x44）
+  - SHT30/31/35（Sensirion，地址 0x44）
+  - AHT20/AHT21（奥松，地址 0x38，市面最常见）
+  - Si7021/HTU21D（Silicon Labs，地址 0x40）
+  - HDC1080（TI，地址 0x40）
+  - BME280（Bosch，地址 0x76/0x77，温+湿+气压）
+- I2C 总线增加 NACK 检测，提高通信可靠性。
+
 ## V10.5.1
 
 ### 用户可见变更
