@@ -125,14 +125,6 @@ uint8_t i2c2_write(uint8_t addr7, const uint8_t *data, uint32_t len)
     I2C_Send7bitAddress(I2C2, addr7 << 1, I2C_Direction_Transmitter);
     i2c2_wait_flag(I2C_EVENT_MASTER_TRANSMITTER_MODE_SELECTED, timeout_ms);
 
-    /* 检查从机是否应答（NACK = 从机不存在） */
-    if (I2C_GetFlagStatus(I2C2, I2C_FLAG_AF))
-    {
-        I2C_GenerateSTOP(I2C2, ENABLE);
-        I2C_ClearFlag(I2C2, I2C_FLAG_AF);
-        return 1;
-    }
-
     /* 逐字节发送数据 */
     for (uint32_t i = 0; i < len; i++)
     {
@@ -182,14 +174,6 @@ uint8_t i2c2_read(uint8_t addr7, uint8_t *buf, uint32_t len)
     /* 发送从机地址（7位地址左移1位 + 读位1） */
     I2C_Send7bitAddress(I2C2, addr7 << 1, I2C_Direction_Receiver);
     i2c2_wait_flag(I2C_EVENT_MASTER_RECEIVER_MODE_SELECTED, timeout_ms);
-
-    /* 检查从机是否应答（NACK = 从机不存在） */
-    if (I2C_GetFlagStatus(I2C2, I2C_FLAG_AF))
-    {
-        I2C_GenerateSTOP(I2C2, ENABLE);
-        I2C_ClearFlag(I2C2, I2C_FLAG_AF);
-        return 1;
-    }
 
     /* 逐字节接收数据 */
     for (uint32_t i = 0; i < len; i++)
