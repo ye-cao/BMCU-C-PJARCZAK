@@ -465,10 +465,10 @@ int main(void)
         /* 更新 RGB LED 显示 */
         RGB_update();
 
-        /* 每 2 秒读取一次 SHT45 温湿度数据并更新到耗材结构体 */
+        /* 每 5 秒读取一次 SHT45 温湿度数据并更新到耗材结构体 */
         static uint32_t last_sht45_ms = 0;
         uint32_t now_ms = (uint32_t)(time_ms64() & 0xFFFFFFFF);
-        if ((now_ms - last_sht45_ms) >= 2000u)
+        if ((now_ms - last_sht45_ms) >= 5000u)
         {
             last_sht45_ms = now_ms;
             sht45_update_filament();

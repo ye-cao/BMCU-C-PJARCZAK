@@ -3,3 +3,5 @@
 *.map
 *.lst
 *.debug.lst
+*.log
+build_*.txt
