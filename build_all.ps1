@@ -26,13 +26,17 @@ Copy-Item -Force $txtMode "$OUT_DIR/$outGuide"
 $total = 0
 $builds = @()
 
-foreach ($p1s in @(0, 1)) {
-    $modeDir = if ($p1s -eq 1) { $MODE_P1S } else { $MODE_A1 }
+foreach ($mode in @("A1", "P1S", "SOFT_LOAD")) {
+    $modeDir = switch ($mode) { "A1" { $MODE_A1 } "P1S" { $MODE_P1S } "SOFT_LOAD" { "soft_load(A1)" } }
     $modeBase = "$OUT_DIR/$modeDir"
     New-Item -ItemType Directory -Path $modeBase -Force | Out-Null
     Copy-Item -Force $txtAutoload "$modeBase/$outGuide"
 
-    foreach ($dm in @(1, 0)) {
+    $dmValues = @(1, 0)
+    $p1sValue = if ($mode -eq "P1S") { 1 } else { 0 }
+    $softLoad = if ($mode -eq "SOFT_LOAD") { 1 } else { 0 }
+
+    foreach ($dm in $dmValues) {
         $dmDir = if ($dm -eq 1) { "AUTOLOAD" } else { "NO_AUTOLOAD" }
         $dmBase = "$modeBase/$dmDir"
         New-Item -ItemType Directory -Path $dmBase -Force | Out-Null
@@ -50,7 +54,7 @@ foreach ($p1s in @(0, 1)) {
             $total++
             $builds += @{
                 OutPath = "$base/SOLO/solo_${SOLO_RETRACT}.bin"
-                AmsNum = 0; Retract = "${SOLO_RETRACT}"; Dm = $dm; Rgb = $rgb; P1s = $p1s
+                AmsNum = 0; Retract = "${SOLO_RETRACT}"; Dm = $dm; Rgb = $rgb; P1s = $p1sValue; SoftLoad = $softLoad
             }
 
             foreach ($slot in @("A","B","C","D")) {
@@ -59,7 +63,7 @@ foreach ($p1s in @(0, 1)) {
                     $total++
                     $builds += @{
                         OutPath = "$base/AMS_$slot/ams_$($slot.ToLower())_${r}f.bin"
-                        AmsNum = $amsNum; Retract = "${r}f"; Dm = $dm; Rgb = $rgb; P1s = $p1s
+                        AmsNum = $amsNum; Retract = "${r}f"; Dm = $dm; Rgb = $rgb; P1s = $p1sValue; SoftLoad = $softLoad
                     }
                 }
             }
@@ -84,7 +88,7 @@ foreach ($b in $builds) {
     $env:BMCU_DM_TWO_MICROSWITCH = $b.Dm.ToString()
     $env:BMCU_ONLINE_LED_FILAMENT_RGB = $b.Rgb.ToString()
     $env:DBMCU_P1S = $b.P1s.ToString()
-    $env:BMCU_SOFT_LOAD = "0"
+    $env:BMCU_SOFT_LOAD = $b.SoftLoad.ToString()
 
     $env:PYTHONIOENCODING = "utf-8"
     $ErrorActionPreference = "Continue"
