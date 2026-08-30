@@ -21,15 +21,6 @@
 typedef uint32_t u32_alias __attribute__((may_alias));
 
 /**
- * @brief 将端口号和地址编码为 AHUB 索引
- * 
- * @param port 端口号（高 4 位）
- * @param adr 地址（右移 2 位后作为索引）
- * @return 编码后的索引值
- */
-#define ahubus_map_port_adr_to_index(port, adr) (((uint8_t)port << 4) + ((uint8_t)adr >> 2))
-
-/**
  * @brief 获取 AHUB 数据包类型
  * 
  * 验证数据包的有效性并返回包类型：
@@ -59,16 +50,6 @@ ahubus_package_type ahubus_get_package_type(uint8_t *package_recv_buf)
         return ahubus_package_type::none; // CRC 校验失败
 
     return (ahubus_package_type)package_recv_buf[4]; // 命令类型位于偏移 4
-}
-
-/**
- * @brief 初始化 AHUB 协议
- * 
- * 启用 CH32V203 的 CRC 硬件外设时钟，为后续的 CRC32 计算做准备。
- */
-void ahubus_init()
-{
-    RCC_AHBPeriphClockCmd(RCC_AHBPeriph_CRC, ENABLE);
 }
 
 /**
@@ -371,18 +352,6 @@ void ahubus_slave_get_package_query(uint8_t *buf)
     bus_port_to_host.send_data_len = ahubus_package_add_crc(out); // 添加 CRC 并设置发送长度
 }
 
-
-/**
- * @brief AHUB 同步请求列表结构体
- * 
- * 用于批量同步多个 AMS 通道的状态信息。
- */
-struct ahubus_sync_req_list_struct
-{
-    uint8_t ams_num;            /**< AMS 编号 */
-    uint8_t filament_channel;   /**< 耗材通道号 */
-    ahubus_set_type type;       /**< 同步类型 */
-};
 
 /**
  * @brief AHUB 设置命令包头结构体

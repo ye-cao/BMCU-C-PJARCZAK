@@ -43,10 +43,6 @@ struct bus_tx_metrics
 
 bool bus_uart1_rx_transport_quiet();
 bool bus_uart1_reset_transport_quiescent();
-void bus_uart1_rx_poll();
-void bus_uart1_rx_release_frame();
-void bus_uart1_tx_poll();
-
 /**
  * @brief 总线数据类型枚举
  * 
@@ -222,12 +218,6 @@ public:
         data_CRC8_index = 0;
         irq_package_type = _bus_data_type::none;
         drop_bytes = 0;
-    }
-
-    void release_recv_frame()
-    {
-        recv_data_len = 0;
-        bus_package_type = _bus_data_type::none;
     }
 
     /**

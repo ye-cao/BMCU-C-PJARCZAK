@@ -248,6 +248,3 @@ void USART1_IRQHandler(void)
 /* bmcu_link 依赖的总线接口桩函数（当前为无操作实现） */
 bool bus_uart1_rx_transport_quiet() { return bus_port_to_host.idle; }
 bool bus_uart1_reset_transport_quiescent() { return bus_port_to_host.idle; }
-void bus_uart1_rx_poll() {}
-void bus_uart1_rx_release_frame() {}
-void bus_uart1_tx_poll() {}

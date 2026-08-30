@@ -38,13 +38,6 @@ enum class ahubus_set_type : uint8_t
 };
 
 /**
- * @brief 初始化 AHUB 协议栈
- * 
- * 启用 CRC 硬件外设时钟，为 AHUB 协议的 CRC 校验做准备。
- */
-extern void ahubus_init();
-
-/**
  * @brief AHUB 协议主运行函数（主循环调用）
  * 
  * 从总线端口读取接收到的 AHUB 数据包，解析包类型，
