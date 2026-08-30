@@ -28,12 +28,10 @@
 #include "ams.h"           // _filament_motion / _filament_type / ams[]
 #include "tpu_params.h"    // TPU_FIXED_ID[4] 写死型号
 
-// 默认编入 OLED 驱动；如不需要，注释掉下面三行（使 BMCU_OLED 不被定义）
-#ifndef BMCU_OLED
-#define BMCU_OLED
-#endif
+// BMCU_OLED 由 platformio.ini build_flags 或 build_fast.py 定义
+// 不定义时整个 OLED 驱动编译为空（零开销）
 
-#ifdef BMCU_OLED
+#if BMCU_OLED
 
 // ---------- 屏幕几何常量 ----------
 #define OLED_W       128u

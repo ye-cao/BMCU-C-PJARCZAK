@@ -425,7 +425,7 @@ bool set_motion(unsigned char read_num, unsigned char statu_flags, unsigned char
             ams_ptr->filament[ch].motion = _filament_motion::send_out;
             ams_ptr->filament_use_flag = kUseFlagSend;    // 送丝使用标志
             ams_ptr->pressure = kPressureSendOut;           // 送丝状态压力值
-#ifdef BMCU_OLED
+#if BMCU_OLED
             SSD1306_OLED::notify_action(ch, SSD1306_OLED::oled_action::action_load);   // 进料覆盖显示
 #endif
         }
@@ -484,7 +484,7 @@ bool set_motion(unsigned char read_num, unsigned char statu_flags, unsigned char
             {
                 ams_ptr->pressure = kPressurePrepare;
             }
-#ifdef BMCU_OLED
+#if BMCU_OLED
             // 打印机明确停止供料(stop_on_use)：立即结束 OLED 动作显示(退出 FEEDING/LOADING)
             SSD1306_OLED::notify_action(ch, SSD1306_OLED::oled_action::action_idle);
 #endif
@@ -530,7 +530,7 @@ bool set_motion(unsigned char read_num, unsigned char statu_flags, unsigned char
 
             ams_ptr->filament[ch].motion = _filament_motion::on_use;
             ams_ptr->filament_use_flag = kUseFlagActive;
-#ifdef BMCU_OLED
+#if BMCU_OLED
             SSD1306_OLED::notify_action(ch, SSD1306_OLED::oled_action::action_feed);   // 送料覆盖显示
 #endif
 
@@ -567,7 +567,7 @@ bool set_motion(unsigned char read_num, unsigned char statu_flags, unsigned char
             ams_ptr->pressure = kPressureActive;
 
             ams_state_set_unloaded(ch);           // 标记该通道已卸载
-#ifdef BMCU_OLED
+#if BMCU_OLED
             SSD1306_OLED::notify_action(ch, SSD1306_OLED::oled_action::action_unload); // 退料覆盖显示
 #endif
         }
@@ -599,7 +599,7 @@ bool set_motion(unsigned char read_num, unsigned char statu_flags, unsigned char
                 {
                     ams_ptr->filament[ch].motion = _filament_motion::pull_back;
                     ams_ptr->filament_use_flag = kUseFlagSend;
-#ifdef BMCU_OLED
+#if BMCU_OLED
                     SSD1306_OLED::notify_action(ch, SSD1306_OLED::oled_action::action_unload); // 退料覆盖显示
 #endif
                 }

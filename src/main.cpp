@@ -421,7 +421,7 @@ int main(void)
     /* 初始化各子系统 */
     DEBUG_init();          /* 调试串口（可选） */
     th_sensor_init();       /* 温湿度传感器（自动检测类型） */
-#ifdef BMCU_OLED
+#if BMCU_OLED
     SSD1306_OLED::init();   /* OLED 显示屏（硬件 I2C2，自动探测 ACK） */
 #endif
     ams_init();            /* AMS 数据结构初始化 */
@@ -529,7 +529,7 @@ int main(void)
         }
 
         /* 每 1 秒更新一次 OLED 显示（页面轮询 + 动作覆盖） */
-#ifdef BMCU_OLED
+#if BMCU_OLED
         static uint32_t last_oled_ms = 0u;
         if ((now_ms - last_oled_ms) >= 1000u)
         {

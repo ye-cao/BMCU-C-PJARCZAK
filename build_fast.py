@@ -54,6 +54,7 @@ VARIANT_MACROS = [
     "BAMBU_BUS_AMS_NUM", "AMS_RETRACT_LEN",
     "BMCU_DM_TWO_MICROSWITCH", "BMCU_ONLINE_LED_FILAMENT_RGB",
     "DBMCU_P1S", "BMCU_SOFT_LOAD",
+    "BMCU_OLED",
 ]
 RETRACT_MACRO = "AMS_RETRACT_LEN"
 PLACEHOLDER_FLOAT = 123.456
@@ -457,24 +458,26 @@ log("=" * 60)
 
 tasks = []
 for mode_dir, p1s, soft_load in MODES:
-    for dm in (1, 0):
-        dm_dir = "AUTOLOAD" if dm == 1 else "NO_AUTOLOAD"
-        for rgb in (1, 0):
-            rgb_dir = "FILAMENT_RGB_ON" if rgb == 1 else "FILAMENT_RGB_OFF"
-            base = os.path.join(OUT_DIR, mode_dir, dm_dir, rgb_dir)
-            if dm == 1 and auto_retract:
-                tasks.append((os.path.join(base, "SOLO", f"solo_{AUTO_RETRACT_CAP}f_auto.bin"),
-                              0, f"{AUTO_RETRACT_CAP}f", dm, rgb, p1s, soft_load))
-                for slot, ams_num in (("A", 0), ("B", 1), ("C", 2), ("D", 3)):
-                    tasks.append((os.path.join(base, f"AMS_{slot}", f"ams_{slot.lower()}_{AUTO_RETRACT_CAP}f_auto.bin"),
-                                  ams_num, f"{AUTO_RETRACT_CAP}f", dm, rgb, p1s, soft_load))
-            else:
-                tasks.append((os.path.join(base, "SOLO", f"solo_{SOLO_RETRACT}.bin"),
-                              0, SOLO_RETRACT, dm, rgb, p1s, soft_load))
-                for slot, ams_num in (("A", 0), ("B", 1), ("C", 2), ("D", 3)):
-                    for r in RETRACTS:
-                        tasks.append((os.path.join(base, f"AMS_{slot}", f"ams_{slot.lower()}_{r}f.bin"),
-                                      ams_num, f"{r}f", dm, rgb, p1s, soft_load))
+    for oled in (1, 0):
+        oled_base = os.path.join(OUT_DIR, "noled") if oled == 0 else OUT_DIR
+        for dm in (1, 0):
+            dm_dir = "AUTOLOAD" if dm == 1 else "NO_AUTOLOAD"
+            for rgb in (1, 0):
+                rgb_dir = "FILAMENT_RGB_ON" if rgb == 1 else "FILAMENT_RGB_OFF"
+                base = os.path.join(oled_base, mode_dir, dm_dir, rgb_dir) if oled == 0 else os.path.join(OUT_DIR, mode_dir, dm_dir, rgb_dir)
+                if dm == 1 and auto_retract:
+                    tasks.append((os.path.join(base, "SOLO", f"solo_{AUTO_RETRACT_CAP}f_auto.bin"),
+                                  0, f"{AUTO_RETRACT_CAP}f", dm, rgb, p1s, soft_load, oled))
+                    for slot, ams_num in (("A", 0), ("B", 1), ("C", 2), ("D", 3)):
+                        tasks.append((os.path.join(base, f"AMS_{slot}", f"ams_{slot.lower()}_{AUTO_RETRACT_CAP}f_auto.bin"),
+                                      ams_num, f"{AUTO_RETRACT_CAP}f", dm, rgb, p1s, soft_load, oled))
+                else:
+                    tasks.append((os.path.join(base, "SOLO", f"solo_{SOLO_RETRACT}.bin"),
+                                  0, SOLO_RETRACT, dm, rgb, p1s, soft_load, oled))
+                    for slot, ams_num in (("A", 0), ("B", 1), ("C", 2), ("D", 3)):
+                        for r in RETRACTS:
+                            tasks.append((os.path.join(base, f"AMS_{slot}", f"ams_{slot.lower()}_{r}f.bin"),
+                                          ams_num, f"{r}f", dm, rgb, p1s, soft_load, oled))
 
 total_tasks = len(tasks)
 log(f"  总计 {total_tasks} 个固件编译任务")
@@ -484,21 +487,22 @@ if os.path.exists(OUT_DIR):
 os.makedirs(OUT_DIR, exist_ok=True)
 shutil.copy(TXT_MODE, os.path.join(OUT_DIR, OUT_GUIDE))
 for mode_dir, p1s, soft_load in MODES:
-    mode_base = os.path.join(OUT_DIR, mode_dir)
-    os.makedirs(mode_base, exist_ok=True)
-    shutil.copy(TXT_AUTOLOAD, os.path.join(mode_base, OUT_GUIDE))
-    for dm in (1, 0):
-        dm_dir = "AUTOLOAD" if dm == 1 else "NO_AUTOLOAD"
-        dm_base = os.path.join(mode_base, dm_dir)
-        os.makedirs(dm_base, exist_ok=True)
-        shutil.copy(TXT_RGB, os.path.join(dm_base, OUT_GUIDE))
-        for rgb in (1, 0):
-            rgb_dir = "FILAMENT_RGB_ON" if rgb == 1 else "FILAMENT_RGB_OFF"
-            b = os.path.join(dm_base, rgb_dir)
-            os.makedirs(b, exist_ok=True)
-            shutil.copy(TXT_SLOTS, os.path.join(b, OUT_GUIDE))
-            for slot in ("SOLO", "AMS_A", "AMS_B", "AMS_C", "AMS_D"):
-                os.makedirs(os.path.join(b, slot), exist_ok=True)
+    for oled_base in (OUT_DIR, os.path.join(OUT_DIR, "noled")):
+        mode_base = os.path.join(oled_base, mode_dir)
+        os.makedirs(mode_base, exist_ok=True)
+        shutil.copy(TXT_AUTOLOAD, os.path.join(mode_base, OUT_GUIDE))
+        for dm in (1, 0):
+            dm_dir = "AUTOLOAD" if dm == 1 else "NO_AUTOLOAD"
+            dm_base = os.path.join(mode_base, dm_dir)
+            os.makedirs(dm_base, exist_ok=True)
+            shutil.copy(TXT_RGB, os.path.join(dm_base, OUT_GUIDE))
+            for rgb in (1, 0):
+                rgb_dir = "FILAMENT_RGB_ON" if rgb == 1 else "FILAMENT_RGB_OFF"
+                b = os.path.join(dm_base, rgb_dir)
+                os.makedirs(b, exist_ok=True)
+                shutil.copy(TXT_SLOTS, os.path.join(b, OUT_GUIDE))
+                for slot in ("SOLO", "AMS_A", "AMS_B", "AMS_C", "AMS_D"):
+                    os.makedirs(os.path.join(b, slot), exist_ok=True)
 
 
 # ====================================================================
@@ -528,7 +532,7 @@ def compile_one(compiler, flags, src, obj_path):
     return True
 
 
-def variant_defines(dm, rgb, p1s, soft_load, ams_num, retract="0.095f"):
+def variant_defines(dm, rgb, p1s, soft_load, ams_num, retract="0.095f", oled=1):
     defines = [
         f"-DBMCU_DM_TWO_MICROSWITCH={dm}",
         f"-DBMCU_ONLINE_LED_FILAMENT_RGB={rgb}",
@@ -536,6 +540,7 @@ def variant_defines(dm, rgb, p1s, soft_load, ams_num, retract="0.095f"):
         f"-DBMCU_SOFT_LOAD={soft_load}",
         f"-DBAMBU_BUS_AMS_NUM={ams_num}",
         f"-DAMS_RETRACT_LEN={retract}",
+        f"-DBMCU_OLED={oled}",
     ]
     if dm == 1 and not auto_retract:
         defines.append("-DBMCU_DM_AUTO_RETRACT=0")
@@ -544,8 +549,8 @@ def variant_defines(dm, rgb, p1s, soft_load, ams_num, retract="0.095f"):
     return defines
 
 
-def vkey_of(dm, rgb, p1s, soft_load, ams_num):
-    return f"dm{dm}_rgb{rgb}_p1s{p1s}_sl{soft_load}_ams{ams_num}"
+def vkey_of(dm, rgb, p1s, soft_load, ams_num, oled=1):
+    return f"dm{dm}_rgb{rgb}_p1s{p1s}_sl{soft_load}_ams{ams_num}_oled{oled}"
 
 
 compile_tasks = []
@@ -562,19 +567,19 @@ for obj_path in list(framework_objs.keys()):
     framework_objs[obj_path] = os.path.abspath(obj_path.replace("\\", "/"))
 
 mode_combos = set()
-for (_, ams_num, _, dm, rgb, p1s, soft_load) in tasks:
-    mode_combos.add((dm, rgb, p1s, soft_load, ams_num))
+for (_, ams_num, _, dm, rgb, p1s, soft_load, oled) in tasks:
+    mode_combos.add((dm, rgb, p1s, soft_load, ams_num, oled))
 
 other_user_map = {}
 retract_user_map = {}
 
 for combo in sorted(mode_combos):
-    dm, rgb, p1s, soft_load, ams_num = combo
-    vkey = vkey_of(dm, rgb, p1s, soft_load, ams_num)
+    dm, rgb, p1s, soft_load, ams_num, oled = combo
+    vkey = vkey_of(dm, rgb, p1s, soft_load, ams_num, oled)
     vdir = os.path.join(CACHE_DIR, "variant", vkey)
     os.makedirs(vdir, exist_ok=True)
-    defs = variant_defines(dm, rgb, p1s, soft_load, ams_num)
-    defs_ph = variant_defines(dm, rgb, p1s, soft_load, ams_num, retract=f"{PLACEHOLDER_FLOAT}f")
+    defs = variant_defines(dm, rgb, p1s, soft_load, ams_num, oled=oled)
+    defs_ph = variant_defines(dm, rgb, p1s, soft_load, ams_num, retract=f"{PLACEHOLDER_FLOAT}f", oled=oled)
     for obj_path, (src, compiler, flags) in compile_map.items():
         if src not in user_src_set:
             continue
@@ -685,8 +690,8 @@ t_link = time.perf_counter()
 
 
 def run_base_link(combo):
-    dm, rgb, p1s, soft_load, ams_num = combo
-    vkey = vkey_of(dm, rgb, p1s, soft_load, ams_num)
+    dm, rgb, p1s, soft_load, ams_num, oled = combo
+    vkey = vkey_of(dm, rgb, p1s, soft_load, ams_num, oled)
     elf_path = build_link_objs(vkey)
     bin_path = os.path.join(os.path.dirname(elf_path), "firmware.bin")
     with link_sem:
@@ -746,8 +751,8 @@ total_patch = len(tasks)
 
 def patch_and_copy(task):
     global done_patch
-    out_path, ams_num, retract_str, dm, rgb, p1s, soft_load = task
-    vkey = vkey_of(dm, rgb, p1s, soft_load, ams_num)
+    out_path, ams_num, retract_str, dm, rgb, p1s, soft_load, oled = task
+    vkey = vkey_of(dm, rgb, p1s, soft_load, ams_num, oled)
     base_data = base_bins.get(vkey)
     if base_data is None:
         return f"NO BASE for {vkey}"

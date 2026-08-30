@@ -22,7 +22,7 @@
 #include "ch32v20x.h"      // CH32V203 寄存器定义（用于 probe_ack 的 I2C 标志位检查）
 #include "ch32v20x_i2c.h"  // I2C 外设操作函数
 
-#ifdef BMCU_OLED
+#if BMCU_OLED
 
 /* ==================== 轻量字符串辅助 ==================== */
 
