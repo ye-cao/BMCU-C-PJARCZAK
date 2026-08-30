@@ -343,6 +343,26 @@ static float    dm_auto_remain_m[4]     = {0,0,0,0};
 static float    dm_auto_last_m[4]       = {0,0,0,0};
 /** @brief 耗材掉落检测时间戳（毫秒） */
 static uint64_t dm_loaded_drop_t0_ms[4] = {0ull,0ull,0ull,0ull};
+
+/* 复位双微动自动装载的状态机字段（三处重复逻辑共用） */
+static void dm_auto_fields_reset(uint8_t ch)
+{
+    dm_auto_state[ch]    = DM_AUTO_IDLE;
+    dm_auto_try[ch]      = 0u;
+    dm_auto_t0_ms[ch]    = 0ull;
+    dm_auto_remain_m[ch] = 0.0f;
+    dm_auto_last_m[ch]   = 0.0f;
+}
+
+/* 复位状态机核心字段（保留 last_m 用于增量追踪） */
+static void dm_auto_reset_state(uint8_t ch)
+{
+    dm_auto_state[ch]    = DM_AUTO_IDLE;
+    dm_auto_try[ch]      = 0u;
+    dm_auto_remain_m[ch] = 0.0f;
+    dm_auto_t0_ms[ch]    = 0ull;
+}
+
 #endif
 
 /* ==================== 自动卸料参数 ==================== */
@@ -1395,10 +1415,7 @@ public:
                                     }
                                     else
                                     {
-                                        dm_auto_state[CHx]    = DM_AUTO_IDLE;
-                                        dm_auto_try[CHx]      = 0u;
-                                        dm_auto_remain_m[CHx] = 0.0f;
-                                        dm_auto_t0_ms[CHx]    = 0ull;
+                                        dm_auto_reset_state(CHx);
                                     }
                                     break;
                                 }
@@ -1437,10 +1454,7 @@ public:
                                 {
                                     dm_loaded[CHx] = 1u;
 
-                                    dm_auto_state[CHx]    = DM_AUTO_IDLE;
-                                    dm_auto_try[CHx]      = 0u;
-                                    dm_auto_remain_m[CHx] = 0.0f;
-                                    dm_auto_t0_ms[CHx]    = 0ull;
+                                    dm_auto_reset_state(CHx);
 
                                     MC_STU_RGB_set(CHx, 0x38, 0x35, 0x32);
                                     dm_autoload_x = 0.0f;
@@ -1456,10 +1470,7 @@ public:
 
                                 if (ks == 0u)
                                 {
-                                    dm_auto_state[CHx]    = DM_AUTO_IDLE;
-                                    dm_auto_try[CHx]      = 0u;
-                                    dm_auto_remain_m[CHx] = 0.0f;
-                                    dm_auto_t0_ms[CHx]    = 0ull;
+                                    dm_auto_reset_state(CHx);
                                     break;
                                 }
 
@@ -1490,10 +1501,7 @@ public:
                                     }
                                     else
                                     {
-                                        dm_auto_state[CHx]    = DM_AUTO_IDLE;
-                                        dm_auto_try[CHx]      = 0u;
-                                        dm_auto_remain_m[CHx] = 0.0f;
-                                        dm_auto_t0_ms[CHx]    = 0ull;
+                                        dm_auto_reset_state(CHx);
                                     }
                                     dm_autoload_x = 0.0f;
                                 }
@@ -1509,10 +1517,7 @@ public:
 
                                 if (ks == 0u)
                                 {
-                                    dm_auto_state[CHx]    = DM_AUTO_IDLE;
-                                    dm_auto_try[CHx]      = 0u;
-                                    dm_auto_remain_m[CHx] = 0.0f;
-                                    dm_auto_t0_ms[CHx]    = 0ull;
+                                    dm_auto_reset_state(CHx);
                                 }
                                 else if (ks == 2u)
                                 {
@@ -1531,17 +1536,11 @@ public:
 
                                 if (ks == 0u)
                                 {
-                                    dm_auto_state[CHx]    = DM_AUTO_IDLE;
-                                    dm_auto_try[CHx]      = 0u;
-                                    dm_auto_remain_m[CHx] = 0.0f;
-                                    dm_auto_t0_ms[CHx]    = 0ull;
+                                    dm_auto_reset_state(CHx);
                                 }
                                 else if ((now_ms - dm_auto_t0_ms[CHx]) >= DM_AUTO_FAIL_EXTRA_MS)
                                 {
-                                    dm_auto_state[CHx]    = DM_AUTO_IDLE;
-                                    dm_auto_try[CHx]      = 0u;
-                                    dm_auto_remain_m[CHx] = 0.0f;
-                                    dm_auto_t0_ms[CHx]    = 0ull;
+                                    dm_auto_reset_state(CHx);
                                 }
                                 else
                                 {
@@ -1550,10 +1549,7 @@ public:
                                 break;
 
                             default:
-                                dm_auto_state[CHx]    = DM_AUTO_IDLE;
-                                dm_auto_try[CHx]      = 0u;
-                                dm_auto_remain_m[CHx] = 0.0f;
-                                dm_auto_t0_ms[CHx]    = 0ull;
+                                dm_auto_reset_state(CHx);
                                 break;
                             }
                         }
@@ -2772,11 +2768,7 @@ static void motor_motion_run(int error, uint64_t time_now, uint32_t now_ticks)
         {
             dm_loaded[ch]            = 1u;
             dm_fail_latch[ch]        = 0u;
-            dm_auto_state[ch]        = DM_AUTO_IDLE;
-            dm_auto_try[ch]          = 0u;
-            dm_auto_t0_ms[ch]        = 0ull;
-            dm_auto_remain_m[ch]     = 0.0f;
-            dm_auto_last_m[ch]       = 0.0f;
+            dm_auto_fields_reset(ch);
             dm_loaded_drop_t0_ms[ch] = 0ull;
             dm_autoload_gate[ch]     = 0u;
             continue;
@@ -2791,11 +2783,7 @@ static void motor_motion_run(int error, uint64_t time_now, uint32_t now_ticks)
 
             dm_loaded[ch]            = 0u;
             dm_fail_latch[ch]        = 0u;
-            dm_auto_state[ch]        = DM_AUTO_IDLE;
-            dm_auto_try[ch]          = 0u;
-            dm_auto_t0_ms[ch]        = 0ull;
-            dm_auto_remain_m[ch]     = 0.0f;
-            dm_auto_last_m[ch]       = 0.0f;
+            dm_auto_fields_reset(ch);
             dm_loaded_drop_t0_ms[ch] = 0ull;
             continue;
         }
@@ -2809,11 +2797,7 @@ static void motor_motion_run(int error, uint64_t time_now, uint32_t now_ticks)
                 dm_loaded[ch]            = 0u;
                 dm_loaded_drop_t0_ms[ch] = 0ull;
 
-                dm_auto_state[ch]    = DM_AUTO_IDLE;
-                dm_auto_try[ch]      = 0u;
-                dm_auto_t0_ms[ch]    = 0ull;
-                dm_auto_remain_m[ch] = 0.0f;
-                dm_auto_last_m[ch]   = 0.0f;
+                dm_auto_fields_reset(ch);
             }
         }
         else
@@ -3436,11 +3420,7 @@ void Motion_control_init()
             {
                 dm_loaded[ch]            = 1u;
                 dm_fail_latch[ch]        = 0u;
-                dm_auto_state[ch]        = DM_AUTO_IDLE;
-                dm_auto_try[ch]          = 0u;
-                dm_auto_t0_ms[ch]        = 0ull;
-                dm_auto_remain_m[ch]     = 0.0f;
-                dm_auto_last_m[ch]       = 0.0f;
+                dm_auto_fields_reset(ch);
                 dm_loaded_drop_t0_ms[ch] = 0ull;
                 dm_autoload_gate[ch]     = 0u;
                 continue;

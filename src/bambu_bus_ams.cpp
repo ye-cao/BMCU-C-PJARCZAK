@@ -328,6 +328,17 @@ static uint8_t last_before_on_use_motion_flag = 0x00;
 /** @brief on_use 状态重复计数器，用于首次使用时的特殊压力控制 */
 static uint8_t count_on_use = 0u;
 
+/* set_motion 协议常量（压力值 / 使用标志） */
+static constexpr uint16_t kPressureIdle    = 0xF9C6u;
+static constexpr uint16_t kPressureSendOut = 0x4700u;
+static constexpr uint16_t kPressureActive  = 0x2B00u;
+static constexpr uint16_t kPressurePrepare = 0x1E34u;
+static constexpr uint16_t kPressureJam     = 0xF06Fu;
+static constexpr uint16_t kPressureReplyIdle = 0xFF74u;
+static constexpr uint8_t  kUseFlagIdle     = 0x00u;
+static constexpr uint8_t  kUseFlagSend     = 0x02u;
+static constexpr uint8_t  kUseFlagActive   = 0x04u;
+
 /**
  * @brief 设置耗材运动状态
  * 
@@ -390,8 +401,8 @@ bool set_motion(unsigned char read_num, unsigned char statu_flags, unsigned char
                 {
                     const uint8_t prev = ams_ptr->now_filament_num;
                     ams_ptr->filament[prev].motion = _filament_motion::idle;  // 旧通道恢复空闲
-                    ams_ptr->filament_use_flag = 0x00;
-                    ams_ptr->pressure = 0xF9C6;                              // 空闲状态压力值
+                    ams_ptr->filament_use_flag = kUseFlagIdle;
+                    ams_ptr->pressure = kPressureIdle;                              // 空闲状态压力值
                     time_sendout_onuse_ticks[prev] = 0u;
                 }
                 bus_now_ams_num = bambubus_ams_map[fixed_ams_num];
@@ -412,8 +423,8 @@ bool set_motion(unsigned char read_num, unsigned char statu_flags, unsigned char
                 ams_state_set_unloaded(0xFFu);
 
             ams_ptr->filament[ch].motion = _filament_motion::send_out;
-            ams_ptr->filament_use_flag = 0x02;    // 送丝使用标志
-            ams_ptr->pressure = 0x4700;           // 送丝状态压力值
+            ams_ptr->filament_use_flag = kUseFlagSend;    // 送丝使用标志
+            ams_ptr->pressure = kPressureSendOut;           // 送丝状态压力值
 #ifdef BMCU_OLED
             SSD1306_OLED::notify_action(ch, SSD1306_OLED::oled_action::action_load);   // 进料覆盖显示
 #endif
@@ -431,16 +442,16 @@ bool set_motion(unsigned char read_num, unsigned char statu_flags, unsigned char
             const _filament_motion prev = ams_ptr->filament[ch].motion;
 
             ams_ptr->filament[ch].motion = _filament_motion::before_on_use;
-            ams_ptr->filament_use_flag = 0x04;    // 使用中标志
+            ams_ptr->filament_use_flag = kUseFlagActive;    // 使用中标志
 
             if (fliment_motion_flag == 0x7F)
             {
-                ams_ptr->pressure = 0x1E34;       // 正常准备压力
+                ams_ptr->pressure = kPressurePrepare;       // 正常准备压力
             }
             else
             {
                 // 从送丝状态转来使用较高压力，否则使用默认压力
-                ams_ptr->pressure = (prev == _filament_motion::send_out) ? 0x4700 : 0x2B00;
+                ams_ptr->pressure = (prev == _filament_motion::send_out) ? kPressureSendOut : kPressureActive;
             }
 
             ams_state_set_loaded(ch);             // 标记该通道已装载
@@ -465,13 +476,13 @@ bool set_motion(unsigned char read_num, unsigned char statu_flags, unsigned char
                 ams_ptr->filament[ch].motion = _filament_motion::stop_on_use;
             }
 
-            ams_ptr->filament_use_flag = 0x04;
-            ams_ptr->pressure = 0x2B00;
+            ams_ptr->filament_use_flag = kUseFlagActive;
+            ams_ptr->pressure = kPressureActive;
 
             // 如果之前是 0x7F 准备状态，使用特殊压力值
             if (prev == _filament_motion::before_on_use && last_before_on_use_motion_flag == 0x7F)
             {
-                ams_ptr->pressure = 0x1E34;
+                ams_ptr->pressure = kPressurePrepare;
             }
 #ifdef BMCU_OLED
             // 打印机明确停止供料(stop_on_use)：立即结束 OLED 动作显示(退出 FEEDING/LOADING)
@@ -499,8 +510,8 @@ bool set_motion(unsigned char read_num, unsigned char statu_flags, unsigned char
                     if (dt < lim)
                     {
                         // 送丝尚未完成，保持等待状态
-                        ams_ptr->filament_use_flag = 0x04;
-                        ams_ptr->pressure = 0x2B00;
+                        ams_ptr->filament_use_flag = kUseFlagActive;
+                        ams_ptr->pressure = kPressureActive;
                         return true;
                     }
 
@@ -509,8 +520,8 @@ bool set_motion(unsigned char read_num, unsigned char statu_flags, unsigned char
                 else
                 {
                     // 无法计算超时，保持等待
-                    ams_ptr->filament_use_flag = 0x04;
-                    ams_ptr->pressure = 0x2B00;
+                    ams_ptr->filament_use_flag = kUseFlagActive;
+                    ams_ptr->pressure = kPressureActive;
                     return true;
                 }
             }
@@ -518,19 +529,19 @@ bool set_motion(unsigned char read_num, unsigned char statu_flags, unsigned char
             t_sendout_onuse = 0u;
 
             ams_ptr->filament[ch].motion = _filament_motion::on_use;
-            ams_ptr->filament_use_flag = 0x04;
+            ams_ptr->filament_use_flag = kUseFlagActive;
 #ifdef BMCU_OLED
             SSD1306_OLED::notify_action(ch, SSD1306_OLED::oled_action::action_feed);   // 送料覆盖显示
 #endif
 
             // 保持特殊压力值 0xF06F，否则使用默认压力
-            if (ams_ptr->pressure != 0xF06Fu) ams_ptr->pressure = 0x2B00;
+            if (ams_ptr->pressure != kPressureJam) ams_ptr->pressure = kPressureActive;
 
             // 首次使用时的特殊压力控制（0x7F 准备状态后前 5 次）
             if (last_before_on_use_motion_flag == 0x7F && count_on_use < 5)
             {
                 count_on_use++;
-                ams_ptr->pressure = 0x1E34;
+                ams_ptr->pressure = kPressurePrepare;
             }
 
             ams_state_set_loaded(ch);             // 标记该通道已装载
@@ -552,8 +563,8 @@ bool set_motion(unsigned char read_num, unsigned char statu_flags, unsigned char
                 ams_ptr->filament[ch].motion = _filament_motion::before_pull_back;
             }
 
-            ams_ptr->filament_use_flag = 0x04;
-            ams_ptr->pressure = 0x2B00;
+            ams_ptr->filament_use_flag = kUseFlagActive;
+            ams_ptr->pressure = kPressureActive;
 
             ams_state_set_unloaded(ch);           // 标记该通道已卸载
 #ifdef BMCU_OLED
@@ -564,8 +575,8 @@ bool set_motion(unsigned char read_num, unsigned char statu_flags, unsigned char
         {
             // 其他 0x09 状态：仅更新标志和压力
             t_sendout_onuse = 0u;
-            ams_ptr->filament_use_flag = 0x04;
-            ams_ptr->pressure = 0x2B00;
+            ams_ptr->filament_use_flag = kUseFlagActive;
+            ams_ptr->pressure = kPressureActive;
         }
     }
     else if (read_num == 0xFF) // 全局命令（影响所有通道）
@@ -587,13 +598,13 @@ bool set_motion(unsigned char read_num, unsigned char statu_flags, unsigned char
                     m == _filament_motion::stop_on_use)
                 {
                     ams_ptr->filament[ch].motion = _filament_motion::pull_back;
-                    ams_ptr->filament_use_flag = 0x02;
+                    ams_ptr->filament_use_flag = kUseFlagSend;
 #ifdef BMCU_OLED
                     SSD1306_OLED::notify_action(ch, SSD1306_OLED::oled_action::action_unload); // 退料覆盖显示
 #endif
                 }
 
-                ams_ptr->pressure = 0x4700;
+                ams_ptr->pressure = kPressureSendOut;
                 ams_state_set_unloaded(ch);
             }
         }
@@ -627,8 +638,8 @@ bool set_motion(unsigned char read_num, unsigned char statu_flags, unsigned char
                 time_sendout_onuse_ticks[i] = 0u;
             }
 
-            ams_ptr->filament_use_flag = 0x00;
-            ams_ptr->pressure = 0xF9C6;           // 空闲状态压力值
+            ams_ptr->filament_use_flag = kUseFlagIdle;
+            ams_ptr->pressure = kPressureIdle;           // 空闲状态压力值
             ams_ptr->now_filament_num = 0xFF;      // 无通道在使用
             ams_state_set_unloaded(0xFFu);
         }
@@ -837,7 +848,7 @@ void get_package_motion(bambubus_printer_motion_package_struct *package_recv)
 
     const uint8_t ch = ams_ptr->now_filament_num;
     const bool is_idle = (ch == 0xFF);               // 是否空闲（无通道在使用）
-    const uint16_t pressure = is_idle ? 0xFF74 : ams_ptr->pressure; // 空闲时使用固定压力值
+    const uint16_t pressure = is_idle ? kPressureReplyIdle : ams_ptr->pressure; // 空闲时使用固定压力值
 
     package_send->flag = 0xC0 | (uint8_t)(package_num << 3); // 包含序列号的帧标志
     package_send->ams_num = fixed_ams_num;
@@ -903,14 +914,14 @@ void get_package_motion(bambubus_printer_motion_package_struct *package_recv)
         else
         {
             // 嗅探表已用完，使用默认值
-            package_send->pressure = 0x1E34u;
+            package_send->pressure = kPressurePrepare;
             package_send->unknow2 = 0x0AFDu;
         }
     }
-    else if (pressure == 0xF06Fu)
+    else if (pressure == kPressureJam)
     {
         // 特殊压力值处理
-        package_send->pressure = 0xF06Fu;
+        package_send->pressure = kPressureJam;
         package_send->unknow2 = 0x1CE7u;
     }
 
@@ -1086,7 +1097,7 @@ void get_package_stu_motion(bambubus_printer_stu_motion_package_struct *package_
 
     const uint8_t ch = ams_ptr->now_filament_num;
     const bool is_idle = (ch == 0xFF);
-    const uint16_t pressure = is_idle ? 0xFF74 : ams_ptr->pressure;
+    const uint16_t pressure = is_idle ? kPressureReplyIdle : ams_ptr->pressure;
 
     package_send->flag = 0xC0 | (uint8_t)(package_num << 3);
     package_send->ams_num_stu = fixed_ams_num;
@@ -1114,9 +1125,9 @@ void get_package_stu_motion(bambubus_printer_stu_motion_package_struct *package_
     package_send->filament_stu_flag = get_filament_left_char(ams_ptr);
 
     // 特殊压力值处理
-    if (pressure == 0xF06Fu)
+    if (pressure == kPressureJam)
     {
-        package_send->pressure = 0xF06Fu;
+        package_send->pressure = kPressureJam;
         package_send->unknow2 = 0x1CE7u;
     }
 
@@ -1233,6 +1244,17 @@ void get_package_online_detect(unsigned char *buf, int length)
     bus_port_to_host.send_data_len = 29;
 }
 
+/* 长帧回复：回填打印机下发的序列号/类型/地址，并构建发送（5 处重复调用合并） */
+extern bambubus_long_packge_data printer_data_long;
+static void bambubus_long_reply(bambubus_long_packge_data *data)
+{
+    data->package_number  = printer_data_long.package_number;
+    data->type            = printer_data_long.type;
+    data->source_address  = printer_data_long.target_address;
+    data->target_address  = printer_data_long.source_address;
+    bambubus_long_package_get(data);
+}
+
 /**
  * @brief 处理打印机发来的主控在线确认命令（长帧类型 0x21A）
  * 
@@ -1262,12 +1284,7 @@ void get_package_long_packge_MC_online(unsigned char *buf, int length)
     bambubus_long_packge_data data;
     data.datas = resp;
     data.data_length = sizeof(resp);
-    data.package_number = printer_data_long.package_number;  // 回复相同的序列号
-    data.type = printer_data_long.type;                       // 回复相同的命令类型
-    data.source_address = printer_data_long.target_address;  // 源地址 = 原目标地址
-    data.target_address = printer_data_long.source_address;  // 目标地址 = 原源地址
-
-    bambubus_long_package_get(&data); // 构建并发送长帧
+    bambubus_long_reply(&data);
 }
 
 /**
@@ -1336,12 +1353,7 @@ void get_package_long_packge_filament(unsigned char *buf, int length)
     // 设置长帧回复参数
     data.datas = long_packge_filament;
     data.data_length = sizeof(long_packge_filament);
-    data.package_number = printer_data_long.package_number;
-    data.type = printer_data_long.type;
-    data.source_address = printer_data_long.target_address;
-    data.target_address = printer_data_long.source_address;
-
-    bambubus_long_package_get(&data);
+    bambubus_long_reply(&data);
 }
 
 /**
@@ -1487,11 +1499,7 @@ void get_package_long_packge_serial_number(unsigned char *buf, int length)
     bambubus_long_packge_data data;
     data.datas = long_packge_version_serial_number;
     data.data_length = sizeof(long_packge_version_serial_number);
-    data.package_number = printer_data_long.package_number;
-    data.type = printer_data_long.type;
-    data.source_address = printer_data_long.target_address;
-    data.target_address = printer_data_long.source_address;
-    bambubus_long_package_get(&data);
+    bambubus_long_reply(&data);
 }
 
 /**
@@ -1530,12 +1538,7 @@ void get_package_long_packge_version(unsigned char *buf, int length)
     bambubus_long_packge_data data;
     data.datas = long_packge_version_version_and_name_AMS08;
     data.data_length = (uint16_t)sizeof(long_packge_version_version_and_name_AMS08);
-    data.package_number = printer_data_long.package_number;
-    data.type = printer_data_long.type;
-    data.source_address = printer_data_long.target_address;
-    data.target_address = printer_data_long.source_address;
-
-    bambubus_long_package_get(&data);
+    bambubus_long_reply(&data);
 }
 
 /** @brief 设置耗材信息的短帧回复包（8 字节） */
@@ -1659,12 +1662,7 @@ void get_package_set_filament_type2(unsigned char *buf, int length)
     data.datas = set_filament_res_type2;
     data.data_length = sizeof(set_filament_res_type2);
 
-    data.package_number = printer_data_long.package_number;
-    data.type = printer_data_long.type;
-    data.source_address = printer_data_long.target_address;
-    data.target_address = printer_data_long.source_address;
-
-    bambubus_long_package_get(&data);
+    bambubus_long_reply(&data);
 }
 
 /**
