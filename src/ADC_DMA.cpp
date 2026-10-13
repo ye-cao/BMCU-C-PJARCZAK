@@ -22,8 +22,8 @@
 static constexpr uint32_t kCh      = 8;
 /** @brief 每块采样数: 每个块包含 32 个采样周期 (双 ADC 同步, 每周期产生 2 个样本) */
 static constexpr uint32_t kBlock   = 32;
-/** @brief 环形滤波器块数: 4 块用于滑动平均 */
-static constexpr uint32_t kNBlocks = 4;
+/** @brief 环形滤波器块数: 4 块用于滑动平均（V11: 改由 ADC_DMA_FILTER_BLOCKS 常量提供） */
+static constexpr uint32_t kNBlocks = ADC_DMA_FILTER_BLOCKS;
 /** @brief DMA 缓冲区总长度: 8通道 × 32样本 × 2(双ADC) = 512 个 uint32 */
 static constexpr uint32_t kBufLen  = (kCh * kBlock * 2);
 /** @brief 半缓冲区长度: 256 个 uint32 (半传输中断触发点) */
@@ -55,6 +55,8 @@ static float            g_v[2][kCh] __attribute__((aligned(4)));
 static volatile uint8_t g_v_rd = 0;
 /** @brief 累加器脏标志: 1 表示有新数据需要转换为浮点 */
 static volatile uint8_t g_acc_dirty = 0;
+/** @brief 数据发布代数（V11 新增：每次发布新电压值 +1，供校准事件驱动采样检测新数据） */
+static uint32_t g_publication = 0u;
 
 /** @brief 缩放系数: 将 ADC 累加和转换为伏特值
  *  公式: voltage = acc_sum × scale
@@ -290,10 +292,20 @@ const float *ADC_DMA_get_value()
 
         adc_dma_compiler_barrier();
         g_v_rd = wr;         // 原子切换读缓冲区
+        ++g_publication;     // V11: 发布代数递增
         g_acc_dirty = 0u;    // 清除脏标志
     }
 
     return g_v[g_v_rd];
+}
+
+/**
+ * @brief 获取 ADC 数据发布代数（V11 新增）
+ * @return 单调递增的发布计数
+ */
+uint32_t ADC_DMA_generation()
+{
+    return g_publication;
 }
 
 /**
@@ -389,7 +401,7 @@ void ADC_DMA_init()
     RCC_AHBPeriphClockCmd(RCC_AHBPeriph_DMA1, ENABLE);
     RCC_APB2PeriphClockCmd(RCC_APB2Periph_ADC1, ENABLE);
     RCC_APB2PeriphClockCmd(RCC_APB2Periph_ADC2, ENABLE);
-    RCC_ADCCLKConfig(RCC_PCLK2_Div8); // ADC 时钟 = PCLK2 / 8 = 9MHz
+    RCC_ADCCLKConfig(RCC_PCLK2_Div4); // V11: ADC 时钟 = PCLK2 / 4 = 18MHz（配合 V11 时钟树 PPRE2_DIV2）
 
     ADC_DMA_gpio_analog();
 

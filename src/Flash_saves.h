@@ -89,6 +89,8 @@ struct __attribute__((packed, aligned(4))) Flash_FilamentInfo
  * 并加载全部 4 个耗材槽位的缓存数据。
  */
 void Flash_saves_init(void);
+void Flash_background_run(void);
+bool Flash_background_idle(void);
 
 /**
  * @brief 从 Flash 读取指定耗材槽位的信息 (从缓存读取)
@@ -142,24 +144,28 @@ bool Flash_AMS_state_read(uint8_t* loaded_channel);
 bool Flash_AMS_state_write(uint8_t loaded_channel);
 
 /**
- * @brief 读取电机拉动校准数据
- * @param offs[4] 输出: 4通道 ADC 偏移量
- * @param vmin[4] 输出: 4通道 ADC 最小电压值
- * @param vmax[4] 输出: 4通道 ADC 最大电压值
- * @param pol[4] 输出: 4通道极性 (1=正, -1=负), 传 NULL 则不返回
+ * @brief 读取电机拉动校准数据（V11 扩展: 新增 DM 空程阈值与有效位掩码）
+ * @param offs[4]    输出: 4通道 ADC 偏移量
+ * @param vmin[4]    输出: 4通道 ADC 最小电压值
+ * @param vmax[4]    输出: 4通道 ADC 最大电压值
+ * @param pol[4]     输出: 4通道极性 (1=正, -1=负), 传 NULL 则不返回
+ * @param dm_none[4] 输出: 4通道双微动开关"无料"电压阈值, 传 NULL 则不返回
+ * @param valid_mask 输出: 4通道校准有效位掩码 (bit0..3), 传 NULL 则不返回
  * @return true 读取成功
  */
-bool Flash_MC_PULL_cal_read(float offs[4], float vmin[4], float vmax[4], int8_t pol[4]);
+bool Flash_MC_PULL_cal_read(float offs[4], float vmin[4], float vmax[4], int8_t pol[4], float dm_none[4], uint8_t* valid_mask);
 
 /**
- * @brief 写入全部电机拉动校准数据
- * @param offs[4] 4通道 ADC 偏移量
- * @param vmin[4] 4通道 ADC 最小电压值
- * @param vmax[4] 4通道 ADC 最大电压值
- * @param pol[4] 4通道极性 (1=正, -1=负), 传 NULL 则极性全记为正
+ * @brief 写入全部电机拉动校准数据（V11 扩展: 新增 DM 空程阈值与有效位掩码）
+ * @param offs[4]     4通道 ADC 偏移量
+ * @param vmin[4]     4通道 ADC 最小电压值
+ * @param vmax[4]     4通道 ADC 最大电压值
+ * @param pol[4]      4通道极性 (1=正, -1=负), 传 NULL 则极性全记为正
+ * @param dm_none[4]  4通道双微动开关"无料"电压阈值
+ * @param valid_mask  4通道校准有效位掩码 (bit0..3)
  * @return true 写入成功
  */
-bool Flash_MC_PULL_cal_write_all(const float offs[4], const float vmin[4], const float vmax[4], const int8_t pol[4]);
+bool Flash_MC_PULL_cal_write_all(const float offs[4], const float vmin[4], const float vmax[4], const int8_t pol[4], const float dm_none[4], uint8_t valid_mask);
 
 /**
  * @brief 清除电机拉动校准数据 (擦除校准页)

@@ -12,7 +12,6 @@
 <p align="center">
   Bambu Lab 持续收紧对 BMCU 的兼容性限制，BMCU 最终有可能在该生态中完全无法使用。
 </p>
-
 <p align="center">
   为此，我计划为基于开源 Klipper 的打印机开发 BMCU 支持。
 </p>
@@ -41,6 +40,9 @@
   直接通过 Revolut 支付可避免 Ko-fi 手续费，使更多捐款直接用于项目。
 </p>
 
+> [!TIP]
+> If you do not want the AMS/HMS compatibility error to block a project in the slicer, use **[OrcaStudio](https://github.com/jarczakpawel/OrcaStudio)**.
+> On affected A1 / A1 mini firmware, OrcaStudio ignores the device compatibility error, keeps the project usable and retries sending the interrupted print.
 
 # ❗ 重要 - 首次启动（V10.3+） ❗
 
@@ -155,27 +157,42 @@ https://github.com/jarczakpawel/BMCU-Flasher
 
 ---
 
-## AMS_A / AMS_B / AMS_C / AMS_D 固件
+## AMS_AUTO / AMS_A / AMS_B / AMS_C / AMS_D 固件
 
-这些固件版本适用于：
-- 多 BMCU 配置
-- 更长的耗材回退距离
+### AMS_AUTO —— 推荐
 
-如果你想要使用 SOLO 模式但需要更长的回退距离，请使用 AMS_A 代替 SOLO。
+**AMS_AUTO 是新装机的推荐选项。**
+
+它的工作方式与 Bambu 原厂 AMS 寻址系统一致 —— 接入的 BMCU 单元会被
+**自动枚举并分配各自的 AMS 编号**。
+
+大多数情况下，你应该使用 **AMS_AUTO**。
+
+### AMS_A / AMS_B / AMS_C / AMS_D —— 旧版
+
+这些是旧的手工指定槽位固件。
+
+现在它们被视为**旧版（legacy）**，不再是推荐配置。
+
+仅在 **AMS_AUTO 在你的环境下工作不正常**时使用。
 
 ---
 
-## 校准（首次启动）
+## 校准 / 重新校准
 
-正确的校准是必须的。
-没有正确的校准，BMCU 无法正常工作。
+正确的校准非常重要，因为校准之后 BMCU 才知道**每个通道缓冲机构的精确行程极限**。
 
-校准过程请参考以下视频：
-https://www.youtube.com/watch?v=Hn_DNzSmhuc
+开始校准前，请先从所有通道取出耗材。
 
-请仔细按照视频中的校准步骤操作。
+进入校准模式：
 
----
+1. 按住任意一个缓冲机构约 **5 秒**。
+2. 一开始**不要移动任何东西**。BMCU 会记录每个缓冲机构当前的中位/中心位置。
+3. 当该通道 LED 开始**闪烁蓝色**时，把该通道的缓冲机构**完全推到底**，保持约 **1 秒**，然后松开。
+4. 当该通道 LED 开始**闪烁红色**时，把缓冲机构**完全拉到头**，保持约 **1 秒**，然后松开。
+5. 对每个通道重复同样的操作。
+
+After calibration, BMCU knows the exact **minimum, center and maximum buffer positions** for each individual channel.
 
 ## 重新校准
 

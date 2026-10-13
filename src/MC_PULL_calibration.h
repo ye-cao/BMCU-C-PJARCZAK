@@ -1,4 +1,5 @@
 #pragma once
+#include <stdint.h>
 
 /**
  * @file MC_PULL_calibration.h
@@ -19,10 +20,17 @@
  *          3. 通过RGB LED闪烁指示校准进度和结果
  */
 void MC_PULL_calibration_boot();
-
 /**
  * @brief 清除所有校准数据(NVM全擦除)
  * @details 调用Flash_NVM_full_clear()擦除整个NVM存储区，
  *          下次开机将重新执行完整校准流程
+ * @return true 擦除成功（V11 起返回状态）
  */
-void MC_PULL_calibration_clear();
+bool MC_PULL_calibration_clear();
+
+/**
+ * @brief 查询指定通道的校准数据是否有效（V11 新增）
+ * @param ch 通道编号（0..3）
+ * @return true 该通道校准数据有效（NVM valid_mask 对应位已置位）
+ */
+bool MC_PULL_calibration_is_valid(uint8_t ch);

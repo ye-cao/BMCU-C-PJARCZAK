@@ -1,6 +1,10 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stdint.h>
+
+/** @brief 滤波器块数（V11 提取为编译期常量，供 .cpp 与校准模块共用） */
+enum { ADC_DMA_FILTER_BLOCKS = 4u };
 
 /**
  * @file ADC_DMA.h
@@ -54,6 +58,12 @@ void  ADC_DMA_poll(void);
  * @return 指向 8 个 float 的数组 (单位: 伏特), 静态缓冲区
  */
 const float* ADC_DMA_get_value(void);
+
+/**
+ * @brief 获取 ADC 数据发布代数（V11 新增，校准事件驱动采样用于检测新数据）
+ * @return 单调递增的发布计数，每次 get_value 发布新数据时 +1
+ */
+uint32_t ADC_DMA_generation(void);
 
 /**
  * @brief 重置滤波器: 清空所有累加器和环形缓冲区

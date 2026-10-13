@@ -1,5 +1,6 @@
 #pragma once
 #include <stdint.h>
+#include <stdbool.h>
 
 /**
  * @brief BambuBus 协议数据包类型枚举
@@ -53,3 +54,8 @@ void bambubus_heartbeat_seen_fast(void);
  * @return bambubus_package_type 当前处理的数据包类型，用于上层逻辑判断通信状态
  */
 extern bambubus_package_type bambubus_run();
+extern bambubus_package_type bambubus_run();
+uint8_t bambubus_ams_num(void);
+uint8_t bambubus_local_ams_index(void);
+bool bambubus_registered(void);
+bool bambubus_arrange_wait(void);

@@ -7,7 +7,18 @@
 #include "app_api.h"
 #include <math.h>
 
-/** @brief 外部声明，RGB LED刷新函数(在其他模块实现) */
+static uint8_t g_valid_mask = 0u;
+
+bool MC_PULL_calibration_is_valid(uint8_t ch)
+{
+    return ch < 4u && (g_valid_mask & (1u << ch));
+}
+
+static bool finite_voltage(float v)
+{
+    return isfinite(v) && v >= 0.05f && v <= 3.25f;
+}
+
 extern void RGB_update();
 
 /**
@@ -92,43 +103,14 @@ static inline float dm_key_none_threshold_from_idle(float key_value)
     return 0.01f * (float)thr_cv;      // 转换回浮点电压值
 }
 
-/**
- * @brief 获取指定通道的中心校准电压值(已加上偏移量)
- * @param ch 通道号(0~3)
- * @return 校准后的中心电压值
- * @details 读取ADC原始电压后加上MC_PULL_V_OFFSET[ch]偏移量，
- *          使得理想空闲状态下的电压中心为1.65V(参考电压)
- */
-static inline float adc_pull_v_centered(int ch)
-{
-    const float *d = ADC_DMA_get_value();
-    return adc_pull_raw_ch(ch, d) + MC_PULL_V_OFFSET[ch];
-}
-
-/**
- * @brief 根据极性标志应用电压极性翻转
- * @param v  原始电压值
- * @param pol 极性标志(1=正向，-1=反向)
- * @return 极性校正后的电压值
- * @details 若极性为负，返回3.30V - v(ADC满量程3.3V，反向翻转)
- *          用于适配不同方向安装的电位器/传感器
- */
 static inline float cal_apply_polarity(float v, int8_t pol)
 {
     return (pol < 0) ? (3.30f - v) : v;
 }
 
-// --- 校准参数常量 ---
-/** @brief 触发"已按压"判定的最小电压变化量(0.10V) */
-static const float CAL_PRESS_DELTA_V = 0.1f;
-
-/** @brief 判定"已回到中心"的最大电压偏差(0.02V) */
-static const float CAL_CENTER_EPS_V  = 0.02f;
-
-/** @brief 判定电压稳定的最短持续时间(200ms) */
-static const uint32_t CAL_STABLE_MS     = 200;
-
-/** @brief 等待用户操作的最大超时时间(30秒) */
+static const float    CAL_PRESS_DELTA_V = 0.1f;
+static const float    CAL_CENTER_EPS_V  = 0.025f;
+static const uint32_t CAL_STABLE_MS     = 700;
 static const uint32_t CAL_TIMEOUT_MS    = 30000;
 
 /**
@@ -170,40 +152,7 @@ static void blink_one(int ch, uint8_t r, uint8_t g, uint8_t b, int times = 3, in
     }
 }
 
-/**
- * @brief 显示一个诊断步骤的RGB闪烁(所有通道同色)
- * @param r,g,b  RGB颜色分量
- * @param on_ms  亮灯持续时间(默认360ms)
- * @param off_ms 灭灯持续时间(默认180ms)
- * @details 用于校准结果的分步指示:
- *          短闪烁=步骤成功，长闪烁=步骤失败
- */
-static void show_diag_step(uint8_t r, uint8_t g, uint8_t b, int on_ms = 360, int off_ms = 180)
-{
-    for (int ch = 0; ch < 4; ch++) MC_PULL_ONLINE_RGB_set(ch, r, g, b);
-    RGB_update();
-    delay(on_ms);
-    for (int ch = 0; ch < 4; ch++) MC_PULL_ONLINE_RGB_set(ch, 0, 0, 0);
-    RGB_update();
-    delay(off_ms);
-}
-
-/**
- * @brief 捕获第一个极值(首次按压方向)并等待用户松手
- * @param ch             通道号(0~3)
- * @param center_v       中心校准电压值
- * @param out_best_norm  [输出] 捕获到的极值(极性校正后)
- * @param out_pol        [输出] 检测到的极性(1=正向，-1=反向)
- * @return true=成功捕获并等待松手，false=超时未完成
- * @details 校准流程第一步:
- *          1. 等待用户按压(电压偏离中心超过CAL_PRESS_DELTA_V)
- *          2. 记录按压过程中的最大/最小电压
- *          3. 等待用户松手(电压回到中心附近持续200ms)
- *          4. 比较最大/最小偏差确定极性(偏差大的方向=主要按压方向)
- *          5. 返回极性校正后的极值和极性标志
- *          超时30秒，期间LED以蓝色慢闪提示等待
- */
-static bool capture_first_extreme_wait_release(int ch, float center_v, float &out_best_norm, int8_t &out_pol)
+static bool capture_first_extreme_wait_release(int ch, float center_v, float offset, float &out_best_norm, int8_t &out_pol)
 {
     const uint32_t tpm = time_hw_ticks_per_ms();
     const uint32_t t0  = time_ticks32();
@@ -222,7 +171,9 @@ static bool capture_first_extreme_wait_release(int ch, float center_v, float &ou
         const uint32_t now_t = time_ticks32();
         if ((uint32_t)(now_t - t0) >= dt) break;  // 超时退出
 
-        const float v = adc_pull_v_centered(ch);  // 读取中心校准电压
+        const float raw = adc_pull_raw_ch(ch, ADC_DMA_get_value());
+        if (!finite_voltage(raw)) break;
+        const float v = raw + offset;
 
         // LED蓝色慢闪提示等待(每200ms交替亮/灭)
         const uint32_t elapsed_ms = (uint32_t)((now_t - t0) / tpm);
@@ -289,20 +240,7 @@ static bool capture_first_extreme_wait_release(int ch, float center_v, float &ou
     return false;
 }
 
-/**
- * @brief 捕获第二个极值(与第一个极值相反的方向)并等待松手
- * @param ch             通道号(0~3)
- * @param center_v       中心校准电压值
- * @param pol            第一步检测到的极性
- * @param out_best_norm  [输出] 捕获到的极值(极性校正后)
- * @return true=成功捕获，false=超时未完成
- * @details 校准流程第二步:
- *          1. 根据极性决定等待哪个方向的按压(pol<0→等待raw_min，pol>0→等待raw_max)
- *          2. 捕获该方向的极值并等待松手
- *          3. 返回极性校正后的极值
- *          LED以红色慢闪提示等待
- */
-static bool capture_second_extreme_wait_release(int ch, float center_v, int8_t pol, float &out_best_norm)
+static bool capture_second_extreme_wait_release(int ch, float center_v, float offset, int8_t pol, float &out_best_norm)
 {
     const uint32_t tpm = time_hw_ticks_per_ms();
     const uint32_t t0  = time_ticks32();
@@ -319,7 +257,9 @@ static bool capture_second_extreme_wait_release(int ch, float center_v, int8_t p
         const uint32_t now_t = time_ticks32();
         if ((uint32_t)(now_t - t0) >= dt) break;
 
-        const float v = adc_pull_v_centered(ch);
+        const float raw = adc_pull_raw_ch(ch, ADC_DMA_get_value());
+        if (!finite_voltage(raw)) break;
+        const float v = raw + offset;
 
         // LED红色慢闪提示等待
         const uint32_t elapsed_ms = (uint32_t)((now_t - t0) / tpm);
@@ -372,52 +312,34 @@ static bool capture_second_extreme_wait_release(int ch, float center_v, int8_t p
     return false;
 }
 
-/**
- * @brief 捕获单个通道的最小/最大极值和极性(交互式校准)
- * @param ch        通道号(0~3)
- * @param center_v  中心校准电压值
- * @param out_min   [输出] 校准后的最小电压(极性已应用)
- * @param out_max   [输出] 校准后的最大电压(极性已应用)
- * @param out_pol   [输出] 检测到的极性
- * @details 完整的单通道校准流程:
- *          1. capture_first_extreme_wait_release() - 捕获第一个极值
- *          2. capture_second_extreme_wait_release() - 捕获第二个极值
- *          3. 确保最小值与中心值偏差>=50mV，最大值与中心值偏差>=50mV
- *          4. 确保最小值和最大值之间至少有100mV的间距
- *          5. 校准完成后闪烁黄色LED提示
- */
-static void capture_minmax_one_ch_event(int ch, float center_v, float &out_min, float &out_max, int8_t &out_pol)
+static bool capture_minmax_one_ch_event(int ch, float center_v, float offset, float &out_min, float &out_max, int8_t &out_pol)
 {
     float vmin = center_v;
     float vmax = center_v;
     int8_t pol = 1;
 
-    bool ok_min = capture_first_extreme_wait_release(ch, center_v, vmin, pol);
-    if (ok_min) blink_one(ch, 0x10, 0x10, 0x00, 2, 60, 60);  // 黄色闪烁=第一步成功
+    bool ok_min = capture_first_extreme_wait_release(ch, center_v, offset, vmin, pol);
+    if (!ok_min) return false;
+    blink_one(ch, 0x10, 0x10, 0x00, 2, 60, 60);
 
-    bool ok_max = capture_second_extreme_wait_release(ch, center_v, pol, vmax);
-    if (ok_max) blink_one(ch, 0x10, 0x10, 0x00, 2, 60, 60);  // 黄色闪烁=第二步成功
+    bool ok_max = capture_second_extreme_wait_release(ch, center_v, offset, pol, vmax);
+    if (!ok_max) return false;
+    blink_one(ch, 0x10, 0x10, 0x00, 2, 60, 60);
 
-    // 确保最小值与中心值至少有50mV的间距
-    if (vmin > (center_v - 0.050f)) vmin = (center_v - 0.050f);
-    // 确保最大值与中心值至少有50mV的间距
-    if (vmax < (center_v + 0.050f)) vmax = (center_v + 0.050f);
-    // 确保最小值和最大值之间至少有100mV的间距
-    if (vmax <= vmin + 0.10f) { vmin = center_v - 0.10f; vmax = center_v + 0.10f; }
+    if (!isfinite(vmin) || !isfinite(vmax) ||
+        center_v - vmin < 0.050f || vmax - center_v < 0.050f ||
+        vmax - vmin < 0.120f) return false;
 
     out_min = vmin;
     out_max = vmax;
     out_pol = pol;
+    return true;
 }
 
-/**
- * @brief 清除所有校准数据(擦除整个NVM存储区)
- * @details 调用Flash_NVM_full_clear()擦除Flash中保存的所有校准参数，
- *          下次开机将重新执行完整校准流程
- */
-void MC_PULL_calibration_clear()
+bool MC_PULL_calibration_clear()
 {
-    Flash_NVM_full_clear();
+    g_valid_mask = 0u;
+    return Flash_MC_PULL_cal_clear();
 }
 
 /**
@@ -440,142 +362,132 @@ void MC_PULL_calibration_clear()
  */
 void MC_PULL_calibration_boot()
 {
-    // 预采样: 采集6次稳定ADC
+    g_valid_mask = 0u;
     for (int i = 0; i < 6; i++) { ADC_DMA_poll(); delay(20); }
-
-    // 检测各通道料盘是否已插入
     MC_PULL_detect_channels_inserted();
+    uint8_t selected = 0u;
+    for (uint8_t ch = 0u; ch < 4u; ch++)
+        if (filament_channel_inserted[ch]) selected |= (uint8_t)(1u << ch);
+    if (!selected) return;
 
-    // 尝试读取已有校准数据
-    float offs[4], vmin[4], vmax[4];
-    int8_t pol[4];
-    if (Flash_MC_PULL_cal_read(offs, vmin, vmax, pol))
+    float offs[4] = {}, vmin[4] = {}, vmax[4] = {}, dm_none[4] = {};
+    int8_t pol[4] = {1, 1, 1, 1};
+    uint8_t valid = 0u;
+    bool stored = Flash_MC_PULL_cal_read(offs, vmin, vmax, pol, dm_none, &valid);
+    if (stored)
     {
-        // 读取成功，直接加载校准参数
-        for (int ch = 0; ch < 4; ch++)
+        for (uint8_t ch = 0u; ch < 4u; ch++)
         {
-            MC_PULL_V_OFFSET[ch] = offs[ch];      /* 中心电压偏移量 */
-            MC_PULL_V_MIN[ch]    = vmin[ch];       /* 校准最小电压 */
-            MC_PULL_V_MAX[ch]    = vmax[ch];       /* 校准最大电压 */
-            MC_PULL_POLARITY[ch] = (pol[ch] < 0) ? -1 : 1;  /* 极性标志 */
+            if (!(valid & (1u << ch))) continue;
+            if (!isfinite(offs[ch]) || !finite_voltage(1.65f - offs[ch]) ||
+                !isfinite(vmin[ch]) || !isfinite(vmax[ch]) ||
+                1.65f - vmin[ch] < 0.050f || vmax[ch] - 1.65f < 0.050f ||
+                vmax[ch] - vmin[ch] < 0.120f ||
+                !isfinite(dm_none[ch]) || dm_none[ch] < 0.01f * 60.0f || dm_none[ch] > 0.01f * 139.0f)
+                valid &= (uint8_t)~(1u << ch);
         }
-        return;  // 已有校准数据，跳过校准
+        stored = (valid & selected) == selected;
     }
 
-    // 无校准数据，执行完整校准
-    const bool ok_wipe = Flash_NVM_full_clear();  // 清除旧数据
-
-    // --- 第一阶段: 采集空闲状态ADC均值 ---
-    float sum_raw[4] = {0, 0, 0, 0};   // 拉力传感器累加和
-    float sum_key[4] = {0, 0, 0, 0};   // 按键传感器累加和
-    const int N = 90;                     // 采样次数
-    const uint32_t tpm = time_hw_ticks_per_ms();
-    const uint32_t t0  = time_ticks32();
-
-    for (int k = 0; k < N; k++)
+    if (!stored)
     {
-        const float *v = ADC_DMA_get_value();
-
-        for (int ch = 0; ch < 4; ch++)
+        float sum_raw[4] = {}, sum_key[4] = {};
+        float low[4] = {10, 10, 10, 10}, high[4] = {};
+        uint8_t baseline_valid = selected;
+        const int samples = 60;
+        for (int k = 0; k < samples; k++)
         {
-            if (!filament_channel_inserted[ch]) continue;  // 未插入的通道跳过
-            sum_raw[ch] += adc_pull_raw_ch(ch, v);
-            sum_key[ch] += adc_key_raw_ch(ch, v);
+            const float *v = ADC_DMA_get_value();
+            for (uint8_t ch = 0u; ch < 4u; ch++)
+            {
+                if (!(selected & (1u << ch))) continue;
+                const float raw = adc_pull_raw_ch(ch, v);
+                const float key = adc_key_raw_ch(ch, v);
+                if (!finite_voltage(raw) || !isfinite(key) || key < 0.0f || key >= 1.40f)
+                    baseline_valid &= (uint8_t)~(1u << ch);
+                sum_raw[ch] += raw;
+                sum_key[ch] += key;
+                if (raw < low[ch]) low[ch] = raw;
+                if (raw > high[ch]) high[ch] = raw;
+                const bool on = ((k / 15) & 1) == 0;
+                MC_PULL_ONLINE_RGB_set(ch, on ? 0x0Cu : 0u, on ? 0x0Cu : 0u, 0u);
+            }
+            RGB_update();
+            delay(15);
         }
-
-        // LED黄色慢闪指示采样进行中
-        const uint32_t now_t = time_ticks32();
-        const uint32_t elapsed_ms = (uint32_t)((now_t - t0) / tpm);
-        bool on = (((elapsed_ms / 200u) & 1u) == 0u);
-        for (int ch = 0; ch < 4; ch++)
-            MC_PULL_ONLINE_RGB_set(ch, on ? 0x10 : 0, on ? 0x10 : 0, 0x00);
+        for (uint8_t ch = 0u; ch < 4u; ch++)
+        {
+            offs[ch] = 0.0f;
+            vmin[ch] = 1.50f;
+            vmax[ch] = 1.80f;
+            dm_none[ch] = 0.60f;
+            pol[ch] = 1;
+            if (!(selected & (1u << ch))) continue;
+            if (high[ch] - low[ch] > 0.040f) baseline_valid &= (uint8_t)~(1u << ch);
+            if (!(baseline_valid & (1u << ch))) continue;
+            offs[ch] = 1.65f - sum_raw[ch] / (float)samples;
+            dm_none[ch] = dm_key_none_threshold_from_idle(sum_key[ch] / (float)samples);
+            MC_PULL_ONLINE_RGB_set(ch, 0u, 0u, 0u);
+        }
         RGB_update();
-        delay(15);
-    }
+        if (baseline_valid != selected) { blink_all(0x18u, 0u, 0u, 2, 220, 220); return; }
 
-    // 计算各通道中心电压(默认1.65V，未插入通道保持默认)
-    float center_raw[4] = {1.65f, 1.65f, 1.65f, 1.65f};
-    for (int ch = 0; ch < 4; ch++)
-    {
-        if (!filament_channel_inserted[ch]) continue;
-        center_raw[ch] = sum_raw[ch] / (float)N;  // 90次采样均值
-    }
-
-    // --- 第二阶段: 计算偏移量和按键阈值 ---
-    for (int ch = 0; ch < 4; ch++)
-    {
-        if (!filament_channel_inserted[ch])
+        valid = 0u;
+        for (uint8_t ch = 0u; ch < 4u; ch++)
         {
-            // 未插入通道使用默认值
-            MC_PULL_V_OFFSET[ch] = 0.0f;
-            MC_PULL_POLARITY[ch] = 1;
-            MC_DM_KEY_NONE_THRESH[ch] = 0.60f;
-            continue;
+            if (!(selected & (1u << ch))) continue;
+            if (!capture_minmax_one_ch_event(ch, 1.65f, offs[ch], vmin[ch], vmax[ch], pol[ch]))
+            {
+                blink_all(0x18u, 0u, 0u, 2, 220, 220);
+                return;
+            }
+            valid |= (uint8_t)(1u << ch);
+            MC_PULL_ONLINE_RGB_set(ch, 0x10u, 0x10u, 0u);
+            RGB_update();
         }
 
-        // 偏移量 = 1.65V - 实测中心值(使校准后中心归一化到1.65V)
-        MC_PULL_V_OFFSET[ch] = 1.65f - center_raw[ch];
-        MC_PULL_POLARITY[ch] = 1;
-        // 按键无料盘阈值(基于空闲按键电压计算)
-        MC_DM_KEY_NONE_THRESH[ch] =
-            dm_key_none_threshold_from_idle(sum_key[ch] / (float)N);
-    }
-
-    // 计算校准后的中心电压参考值(加上偏移量后应接近1.65V)
-    float center_v_ref[4] = {1.65f, 1.65f, 1.65f, 1.65f};
-    for (int ch = 0; ch < 4; ch++)
-    {
-        if (!filament_channel_inserted[ch]) continue;
-        center_v_ref[ch] = center_raw[ch] + MC_PULL_V_OFFSET[ch];
-    }
-
-    // 黄色闪烁提示进入交互式校准阶段
-    blink_all(0x10, 0x10, 0x00, 3, 60, 60);
-
-    // --- 第三阶段: 逐通道交互式校准(引导用户按压) ---
-    for (int ch = 0; ch < 4; ch++)
-    {
-        if (!filament_channel_inserted[ch])
+        const uint32_t started = time_ticks32();
+        uint32_t centered_since = 0u;
+        bool released = false;
+        while ((uint32_t)(time_ticks32() - started) < ms_to_ticks32(CAL_TIMEOUT_MS))
         {
-            // 未插入通道使用默认极值范围
-            MC_PULL_V_MIN[ch] = 1.55f;
-            MC_PULL_V_MAX[ch] = 1.75f;
-            MC_PULL_POLARITY[ch] = 1;
-            continue;
+            const float *v = ADC_DMA_get_value();
+            bool centered = true;
+            for (uint8_t ch = 0u; ch < 4u; ch++)
+            {
+                if (!(selected & (1u << ch))) continue;
+                const float raw = adc_pull_raw_ch(ch, v);
+                const float key = adc_key_raw_ch(ch, v);
+                if (!finite_voltage(raw) || !isfinite(key) || key < 0.0f || key >= dm_none[ch] ||
+                    fabsf(raw + offs[ch] - 1.65f) > 0.080f) centered = false;
+            }
+            const uint32_t now = time_ticks32();
+            if (!centered) centered_since = 0u;
+            else if (!centered_since) centered_since = now;
+            else if ((uint32_t)(now - centered_since) >= ms_to_ticks32(1200u))
+            {
+                released = true;
+                break;
+            }
+            delay(15);
         }
-
-        float mn, mx;
-        int8_t p;
-        capture_minmax_one_ch_event(ch, center_v_ref[ch], mn, mx, p);  // 交互式校准
-
-        MC_PULL_V_MIN[ch] = mn;
-        MC_PULL_V_MAX[ch] = mx;
-        MC_PULL_POLARITY[ch] = (p < 0) ? -1 : 1;
-
-        // 关闭该通道LED，短暂延时后继续下一通道
-        MC_PULL_ONLINE_RGB_set(ch, 0, 0, 0);
-        RGB_update();
-        delay(80);
+        if (!released || valid != selected ||
+            !Flash_MC_PULL_cal_write_all(offs, vmin, vmax, pol, dm_none, valid))
+        {
+            blink_all(0x18u, 0u, 0u, 2, 220, 220);
+            return;
+        }
     }
 
-    // --- 第四阶段: 保存校准参数到Flash ---
-    const bool ok_cal = Flash_MC_PULL_cal_write_all(MC_PULL_V_OFFSET, MC_PULL_V_MIN, MC_PULL_V_MAX, MC_PULL_POLARITY);
-    const bool ok_mot = Motion_control_save_dm_key_none_thresholds();
-    const bool ok = ok_wipe && ok_cal && ok_mot;
-
-    // LED分步显示保存结果
-    if (ok_wipe) show_diag_step(0x00, 0x10, 0x10);   // 青色=擦除成功
-    else         show_diag_step(0x10, 0x00, 0x00, 460, 220);  // 红色=擦除失败
-
-    if (ok_cal) show_diag_step(0x10, 0x10, 0x00);   // 黄色=校准参数保存成功
-    else        show_diag_step(0x10, 0x00, 0x10, 460, 220);  // 紫色=校准参数保存失败
-
-    if (ok_mot) show_diag_step(0x00, 0x00, 0x10);   // 蓝色=按键阈值保存成功
-    else        show_diag_step(0x10, 0x10, 0x10, 460, 220);  // 白色=按键阈值保存失败
-
-    // 最终结果: 绿色=全部成功，红色=有失败
-    if (ok) blink_all(0x00, 0x10, 0x00, 2, 220, 220);
-    else    blink_all(0x10, 0x00, 0x00, 2, 260, 260);
-
-    delay(200);  // 结束后短暂延时
+    for (uint8_t ch = 0u; ch < 4u; ch++)
+    {
+        if (!(valid & (1u << ch))) continue;
+        MC_PULL_V_OFFSET[ch] = offs[ch];
+        MC_PULL_V_MIN[ch] = vmin[ch];
+        MC_PULL_V_MAX[ch] = vmax[ch];
+        MC_PULL_POLARITY[ch] = pol[ch];
+        MC_DM_KEY_NONE_THRESH[ch] = dm_none[ch];
+    }
+    g_valid_mask = valid & selected;
+    if (!stored) blink_all(0u, 0x16u, 0u, 2, 220, 220);
 }

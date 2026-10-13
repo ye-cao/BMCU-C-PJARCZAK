@@ -8,61 +8,206 @@
 #include "ch32v20x_misc.h"
 #include "core_riscv.h"
 #include "crc_bus.h"
+#include "hal/irq_wch.h"
+#include "hal/time_hw.h"
 
-/**
- * @brief 当前连接的主机设备类型
- * 
- * 记录当前与本 AMS 通信的主机设备类型：
- * - 0x0000: 无设备连接
- * - 0x0001: AHUB 集线器
- * - 0x0700: AMS（打印机直连）
- * 
- * 用于长帧通信中的地址过滤和协议分发。
- */
 uint16_t bus_host_device_type=0x0000;
 
-/** @brief USART1 DMA 发送初始化结构体（全局复用） */
 DMA_InitTypeDef bus_uart1_dma_init_structure;
-
-/** @brief USART1 外设初始化函数声明 */
 void bus_uart1_init();
-
-/**
- * @brief USART1 DMA 发送函数声明
- * 
- * 通过 DMA1 Channel4 将数据从内存发送到 USART1 数据寄存器。
- * 支持半双工通信，通过 DE（Driver Enable）引脚控制收发方向。
- * 
- * @param data 待发送的数据指针（需 4 字节对齐）
- * @param length 数据长度（字节）
- */
-void bus_uart1_dma_send(uint8_t *data, uint16_t length);
+bool bus_uart1_dma_send(uint8_t *data, uint16_t length);
 
 
-/**
- * @brief 全局总线端口处理实例
- * 
- * 管理与主机（打印机或集线器）的全部串口通信。
- * 包括数据包接收解析、CRC 校验、心跳检测和响应发送。
- */
 _bus_port_deal bus_port_to_host;
 
-/** @brief 将 UART1 接收中断映射到总线端口的 IRQ 处理函数 */
+static constexpr uint32_t BUS_BAUD = 1250000u;
+static constexpr uint32_t BUS_BITS_PER_CHAR = 11u;
+static constexpr uint32_t RX_SIZE = 2048u;
+static constexpr uint32_t wire_time_us(uint32_t bytes)
+{
+    return (bytes * BUS_BITS_PER_CHAR * 1000u + BUS_BAUD / 1000u - 1u) / (BUS_BAUD / 1000u);
+}
+static volatile uint8_t rx_dma[RX_SIZE] __attribute__((aligned(4)));
+static volatile uint32_t rx_wraps = 0u;
+static volatile bool rx_fault = false;
+static uint32_t rx_consumed = 0u;
+static uint32_t rx_last_progress = 0u;
+static volatile uint32_t tx_deadline = 0u;
+static bool bus_started = false;
+
+static inline __attribute__((always_inline)) uint8_t rx_peek(uint32_t absolute_index)
+{
+    return rx_dma[absolute_index & (RX_SIZE - 1u)];
+}
+
+static uint32_t rx_produced()
+{
+    const uint32_t irq = irq_save_wch();
+    uint32_t count = rx_consumed;
+    bool sampled = false;
+    for (uint8_t retry = 0u; retry < 4u; retry++) {
+        const uint32_t before = DMA1->INTFR & DMA1_FLAG_TC5;
+        const uint32_t remaining = DMA1_Channel5->CNTR;
+        const uint32_t after = DMA1->INTFR & DMA1_FLAG_TC5;
+        if (before != after || !remaining || remaining > RX_SIZE) continue;
+        count = (rx_wraps + (after ? 1u : 0u)) * RX_SIZE + RX_SIZE - remaining;
+        sampled = true;
+        break;
+    }
+    if (!sampled) count = rx_consumed;
+    __asm__ volatile("fence iorw, iorw" ::: "memory");
+    irq_restore_wch(irq);
+    return count;
+}
+
+static void bus_uart_reset()
+{
+    const uint16_t baud = USART1->BRR;
+    const uint16_t control1 = USART1->CTLR1;
+    const uint16_t control2 = USART1->CTLR2;
+    const uint16_t control3 = USART1->CTLR3;
+    USART_DeInit(USART1);
+    USART1->BRR = baud;
+    USART1->CTLR2 = control2;
+    USART1->CTLR3 = control3;
+    USART1->CTLR1 = control1;
+}
+
+static void bus_tx_finish(bool aborted)
+{
+    USART_ITConfig(USART1, USART_IT_TC, DISABLE);
+    USART1->CTLR3 &= (uint16_t)~USART_DMAReq_Tx;
+    DMA1_Channel4->CFGR &= (uint16_t)~DMA_CFGR1_EN;
+    DMA1->INTFCR = DMA1_FLAG_GL4;
+    if (aborted) USART_Cmd(USART1, DISABLE);
+    GPIOA->BCR = GPIO_Pin_12;
+    USART_ClearITPendingBit(USART1, USART_IT_TC);
+    USART1->CTLR1 |= USART_Mode_Rx;
+    if (aborted) {
+        bus_uart_reset();
+        rx_fault = true;
+        ++bus_port_to_host.tx_errors;
+        USART_Cmd(USART1, ENABLE);
+    }
+    bus_port_to_host.idle = true;
+}
+
+void bus_rx_poll()
+{
+    if (!bus_started) return;
+    const uint64_t now64 = time_ticks64();
+    const uint32_t now = (uint32_t)now64;
+    {
+        const uint32_t irq = irq_save_wch();
+        if (!bus_port_to_host.idle) {
+            const bool done = DMA1_Channel4->CNTR == 0u && (USART1->STATR & USART_FLAG_TC);
+            const bool failed = (DMA1->INTFR & DMA1_FLAG_TE4) != 0u;
+            if (done || failed || time_reached32(now, tx_deadline))
+                bus_tx_finish(failed || !done);
+        }
+        irq_restore_wch(irq);
+    }
+    if (rx_fault) {
+        const uint32_t irq = irq_save_wch();
+        if (!bus_port_to_host.idle) {
+            irq_restore_wch(irq);
+            return;
+        }
+        USART1->CTLR1 &= (uint16_t)~USART_Mode_Rx;
+        DMA1_Channel5->CFGR &= (uint16_t)~DMA_CFGR1_EN;
+        USART_Cmd(USART1, DISABLE);
+        bus_uart_reset();
+        DMA1->INTFCR = DMA1_FLAG_GL5;
+        DMA1_Channel5->MADDR = (uint32_t)rx_dma;
+        DMA1_Channel5->CNTR = RX_SIZE;
+        rx_wraps = rx_consumed = 0u;
+        rx_fault = false;
+        rx_last_progress = now;
+        bus_port_to_host.reset_rx();
+        ++bus_port_to_host.rx_dropped;
+        DMA1_Channel5->CFGR |= DMA_CFGR1_EN;
+        USART1->CTLR1 |= USART_Mode_Rx;
+        USART_Cmd(USART1, ENABLE);
+        irq_restore_wch(irq);
+    }
+    const uint32_t produced = rx_produced();
+    if (rx_fault) return;
+    if ((uint32_t)(produced - rx_consumed) >= RX_SIZE) {
+        rx_fault = true;
+        return;
+    }
+    if (produced != rx_consumed) rx_last_progress = now;
+    while (rx_consumed != produced && !rx_fault) {
+        // skip heartbeat
+        const uint32_t available = (uint32_t)(produced - rx_consumed);
+        if (__builtin_expect(available >= 5u, 1) &&
+            rx_peek(rx_consumed + 0u) == 0x3Du &&
+            rx_peek(rx_consumed + 1u) == 0xC5u)
+        {
+            const uint32_t hb_len = rx_peek(rx_consumed + 2u);
+            if (hb_len >= 6u && hb_len <= 255u &&
+                rx_peek(rx_consumed + 4u) == 0x20u &&
+                available >= hb_len)
+            {
+                rx_consumed += hb_len;
+                bambubus_heartbeat_seen_fast();
+                continue;
+            }
+        }
+
+        if ((rx_consumed & 127u) == 0u &&
+            (uint32_t)(rx_produced() - rx_consumed) >= RX_SIZE) {
+            rx_fault = true;
+            break;
+        }
+        const uint8_t data = rx_dma[rx_consumed & (RX_SIZE - 1u)];
+        ++rx_consumed;
+        bus_port_to_host.irq(data);
+    }
+    if (!rx_fault && bus_port_to_host.receiving() &&
+        (uint32_t)(now - rx_last_progress) >= us_to_ticks32(wire_time_us(1282u)) &&
+        rx_consumed == rx_produced() && !(USART1->STATR & USART_FLAG_RXNE)) {
+        bus_port_to_host.reset_rx();
+        ++bus_port_to_host.rx_dropped;
+    }
+}
+
+bool bus_background_ready()
+{
+    if (!bus_started) return true;
+    bus_rx_poll();
+    return bus_port_to_host.idle && !bus_port_to_host.send_data_len &&
+        !bus_port_to_host.recv_data_len && !bus_port_to_host.receiving() &&
+        rx_consumed == rx_produced() && !rx_fault &&
+        !(USART1->STATR & USART_FLAG_RXNE);
+}
+
+void bus_shutdown()
+{
+    if (!bus_started) return;
+    const uint32_t deadline = time_ticks32() + us_to_ticks32(wire_time_us(1288u));
+    uint32_t remaining = 1000000u;
+    while (!bus_port_to_host.idle && !time_reached32(time_ticks32(), deadline) && --remaining)
+        bus_rx_poll();
+    const uint32_t irq = irq_save_wch();
+    if (!bus_port_to_host.idle) bus_tx_finish(true);
+    USART_ITConfig(USART1, USART_IT_TC, DISABLE);
+    USART_ITConfig(USART1, USART_IT_PE, DISABLE);
+    USART_ITConfig(USART1, USART_IT_ERR, DISABLE);
+    USART1->CTLR3 &= (uint16_t)~(USART_DMAReq_Rx | USART_DMAReq_Tx);
+    DMA1_Channel5->CFGR &= (uint16_t)~DMA_CFGR1_EN;
+    DMA1_Channel4->CFGR &= (uint16_t)~DMA_CFGR1_EN;
+    DMA1->INTFCR = DMA1_FLAG_GL4 | DMA1_FLAG_GL5;
+    USART_Cmd(USART1, DISABLE);
+    GPIOA->BCR = GPIO_Pin_12;
+    bus_started = false;
+    irq_restore_wch(irq);
+}
+
 #define uart1_port_irq(data) bus_port_to_host.irq(data)
-/** @brief 将 UART1 空闲标志映射到总线端口的 idle 标志 */
 #define uart1_port_idle bus_port_to_host.idle
-/** @brief 将总线端口的发送函数映射到 UART1 DMA 发送函数 */
 #define bus_port_to_host_send_func bus_uart1_dma_send
 
-/**
- * @brief 初始化总线硬件和协议栈
- * 
- * 执行以下初始化步骤：
- * 1. 启用 CRC 硬件外设时钟
- * 2. 初始化 CRC 算法（CRC8 和 CRC16 查找表）
- * 3. 初始化总线端口处理模块（双缓冲、状态机等）
- * 4. 初始化 USART1 外设（GPIO、UART、DMA、中断）
- */
 void bus_init()
 {
     RCC_AHBPeriphClockCmd(RCC_AHBPeriph_CRC, ENABLE);
@@ -71,180 +216,151 @@ void bus_init()
     bus_uart1_init();
 }
 
-/**
- * @brief 初始化 USART1 外设
- * 
- * 配置 CH32V203 的 USART1 用于 1.25Mbps 半双工串口通信：
- * 
- * GPIO 配置：
- * - PA9:  USART1 TX（复用推挽输出，50MHz）
- * - PA10: USART1 RX（上拉输入）
- * - PA12: DE（驱动器使能，推挽输出，50MHz）
- *        DE=高电平：发送模式；DE=低电平：接收模式
- * 
- * USART 配置：
- * - 波特率：1,250,000 bps
- * - 数据位：9 位（含偶校验位）
- * - 停止位：1 位
- * - 校验：偶校验
- * - 模式：收发双工
- * 
- * 中断配置：
- * - RXNE（接收缓冲区非空）：逐字节接收数据
- * - TC（传输完成）：DMA 发送完成后切换回接收模式
- * - 优先级：最高（抢占优先级 0，子优先级 0）
- * 
- * DMA 配置：
- * - DMA1 Channel4：USART1 TX
- * - 方向：内存 → 外设
- * - 模式：单次传输（Normal）
- * - 优先级：非常高
- * - 数据大小：字节
- */
 void bus_uart1_init()
 {
     GPIO_InitTypeDef GPIO_InitStructure = {0};
     USART_InitTypeDef USART_InitStructure = {0};
     NVIC_InitTypeDef NVIC_InitStructure = {0};
 
-    // 启用外设时钟
     RCC_APB2PeriphClockCmd(RCC_APB2Periph_USART1, ENABLE);
     RCC_APB2PeriphClockCmd(RCC_APB2Periph_GPIOA, ENABLE);
     RCC_AHBPeriphClockCmd(RCC_AHBPeriph_DMA1, ENABLE);
 
     /* USART1 TX-->A.9   RX-->A.10   DE-->A.12*/
-    GPIO_InitStructure.GPIO_Pin = GPIO_Pin_9; // TX 引脚
+    GPIO_InitStructure.GPIO_Pin = GPIO_Pin_9; // TX
     GPIO_InitStructure.GPIO_Speed = GPIO_Speed_50MHz;
-    GPIO_InitStructure.GPIO_Mode = GPIO_Mode_AF_PP;  // 复用推挽输出
+    GPIO_InitStructure.GPIO_Mode = GPIO_Mode_AF_PP;
     GPIO_Init(GPIOA, &GPIO_InitStructure);
-
-    GPIO_InitStructure.GPIO_Pin = GPIO_Pin_10; // RX 引脚
-    GPIO_InitStructure.GPIO_Mode = GPIO_Mode_IPU;    // 上拉输入
+    GPIO_InitStructure.GPIO_Pin = GPIO_Pin_10; // RX
+    GPIO_InitStructure.GPIO_Mode = GPIO_Mode_IPU;
     GPIO_Init(GPIOA, &GPIO_InitStructure);
-
-    GPIO_InitStructure.GPIO_Pin = GPIO_Pin_12; // DE 引脚（驱动器使能）
+    GPIO_InitStructure.GPIO_Pin = GPIO_Pin_12; // DE
     GPIO_InitStructure.GPIO_Speed = GPIO_Speed_50MHz;
-    GPIO_InitStructure.GPIO_Mode = GPIO_Mode_Out_PP; // 推挽输出
+    GPIO_InitStructure.GPIO_Mode = GPIO_Mode_Out_PP;
     GPIO_Init(GPIOA, &GPIO_InitStructure);
-    GPIOA->BCR = GPIO_Pin_12; // 初始状态：DE=低电平（接收模式）
+    GPIOA->BCR = GPIO_Pin_12;
 
-    // USART1 参数配置
-    USART_InitStructure.USART_BaudRate = 1250000;              // 波特率 1.25Mbps
-    USART_InitStructure.USART_WordLength = USART_WordLength_9b; // 9 位数据（含校验位）
-    USART_InitStructure.USART_StopBits = USART_StopBits_1;     // 1 位停止位
-    USART_InitStructure.USART_Parity = USART_Parity_Even;      // 偶校验
-    USART_InitStructure.USART_HardwareFlowControl = USART_HardwareFlowControl_None; // 无硬件流控
-    USART_InitStructure.USART_Mode = USART_Mode_Tx | USART_Mode_Rx; // 收发模式
+    USART_InitStructure.USART_BaudRate = BUS_BAUD;
+    USART_InitStructure.USART_WordLength = USART_WordLength_9b;
+    USART_InitStructure.USART_StopBits = USART_StopBits_1;
+    USART_InitStructure.USART_Parity = USART_Parity_Even;
+    USART_InitStructure.USART_HardwareFlowControl = USART_HardwareFlowControl_None;
+    USART_InitStructure.USART_Mode = USART_Mode_Tx | USART_Mode_Rx;
 
     USART_Init(USART1, &USART_InitStructure);
-    USART_ITConfig(USART1, USART_IT_RXNE, ENABLE); // 启用接收中断
-    USART_ITConfig(USART1, USART_IT_TC, ENABLE);   // 启用传输完成中断
+    USART_ITConfig(USART1, USART_IT_TC, DISABLE);
 
-    // NVIC 中断配置
     NVIC_InitStructure.NVIC_IRQChannel = USART1_IRQn;
-    NVIC_InitStructure.NVIC_IRQChannelPreemptionPriority = 0; // 最高抢占优先级
-    NVIC_InitStructure.NVIC_IRQChannelSubPriority = 0;        // 最高子优先级
+    NVIC_InitStructure.NVIC_IRQChannelPreemptionPriority = 0;
+    NVIC_InitStructure.NVIC_IRQChannelSubPriority = 0;
     NVIC_InitStructure.NVIC_IRQChannelCmd = ENABLE;
     NVIC_Init(&NVIC_InitStructure);
 
-    // DMA1 Channel4 配置（USART1 TX）
-    bus_uart1_dma_init_structure.DMA_PeripheralBaseAddr = (uint32_t)&USART1->DATAR; // 外设地址
-    bus_uart1_dma_init_structure.DMA_MemoryBaseAddr = (uint32_t)0;                    // 内存地址（运行时设置）
-    bus_uart1_dma_init_structure.DMA_DIR = DMA_DIR_PeripheralDST;                     // 方向：内存→外设
-    bus_uart1_dma_init_structure.DMA_Mode = DMA_Mode_Normal;                          // 单次传输模式
-    bus_uart1_dma_init_structure.DMA_PeripheralInc = DMA_PeripheralInc_Disable;       // 外设地址不递增
-    bus_uart1_dma_init_structure.DMA_MemoryInc = DMA_MemoryInc_Enable;                // 内存地址递增
-    bus_uart1_dma_init_structure.DMA_Priority = DMA_Priority_VeryHigh;                // 非常高优先级
-    bus_uart1_dma_init_structure.DMA_M2M = DMA_M2M_Disable;                           // 非内存到内存
-    bus_uart1_dma_init_structure.DMA_MemoryDataSize = DMA_MemoryDataSize_Byte;        // 内存数据大小：字节
-    bus_uart1_dma_init_structure.DMA_PeripheralDataSize = DMA_PeripheralDataSize_Byte; // 外设数据大小：字节
-    bus_uart1_dma_init_structure.DMA_BufferSize = 0;                                  // 缓冲区大小（运行时设置）
+    // Configure DMA1 channel 4 for USART1 TX
+    bus_uart1_dma_init_structure.DMA_PeripheralBaseAddr = (uint32_t)&USART1->DATAR;
+    bus_uart1_dma_init_structure.DMA_MemoryBaseAddr = (uint32_t)0;
+    bus_uart1_dma_init_structure.DMA_DIR = DMA_DIR_PeripheralDST;
+    bus_uart1_dma_init_structure.DMA_Mode = DMA_Mode_Normal;
+    bus_uart1_dma_init_structure.DMA_PeripheralInc = DMA_PeripheralInc_Disable;
+    bus_uart1_dma_init_structure.DMA_MemoryInc = DMA_MemoryInc_Enable;
+    bus_uart1_dma_init_structure.DMA_Priority = DMA_Priority_VeryHigh;
+    bus_uart1_dma_init_structure.DMA_M2M = DMA_M2M_Disable;
+    bus_uart1_dma_init_structure.DMA_MemoryDataSize = DMA_MemoryDataSize_Byte;
+    bus_uart1_dma_init_structure.DMA_PeripheralDataSize = DMA_PeripheralDataSize_Byte;
+    bus_uart1_dma_init_structure.DMA_BufferSize = 0;
     DMA_Init(DMA1_Channel4, &bus_uart1_dma_init_structure);
+    DMA_ClearFlag(DMA1_FLAG_GL4);
+    DMA_ITConfig(DMA1_Channel4, DMA_IT_TE, ENABLE);
+    NVIC_InitStructure.NVIC_IRQChannel = DMA1_Channel4_IRQn;
+    NVIC_Init(&NVIC_InitStructure);
 
-    USART_Cmd(USART1, ENABLE); // 启用 USART1
+    DMA_InitTypeDef rx = bus_uart1_dma_init_structure;
+    rx.DMA_MemoryBaseAddr = (uint32_t)rx_dma;
+    rx.DMA_DIR = DMA_DIR_PeripheralSRC;
+    rx.DMA_Mode = DMA_Mode_Circular;
+    rx.DMA_BufferSize = RX_SIZE;
+    DMA_Init(DMA1_Channel5, &rx);
+    DMA_ClearFlag(DMA1_FLAG_GL5);
+    DMA_ITConfig(DMA1_Channel5, DMA_IT_TC | DMA_IT_TE, ENABLE);
+    NVIC_InitStructure.NVIC_IRQChannel = DMA1_Channel5_IRQn;
+    NVIC_Init(&NVIC_InitStructure);
+    rx_wraps = rx_consumed = 0u;
+    rx_fault = false;
+    rx_last_progress = time_ticks32();
+    DMA_Cmd(DMA1_Channel5, ENABLE);
+    USART_DMACmd(USART1, USART_DMAReq_Rx, ENABLE);
+    bus_started = true;
+    USART_Cmd(USART1, ENABLE);
 }
 
-/**
- * @brief 通过 DMA 发送数据
- * 
- * 半双工通信的发送实现：
- * 1. 检查总线是否空闲
- * 2. 标记总线为忙碌状态
- * 3. 停止当前 DMA 传输
- * 4. 设置 DMA 源地址和长度
- * 5. 拉高 DE 引脚（切换到发送模式）
- * 6. 清除 TC 中断标志
- * 7. 启用 USART DMA 请求和 DMA 通道
- * 
- * 发送完成后，USART TC 中断会自动拉低 DE 引脚并恢复接收模式。
- * 
- * @param data 待发送的数据指针
- * @param length 数据长度（字节）
- * 
- * @note 此函数不等待发送完成，发送通过 DMA 异步完成
- */
-void bus_uart1_dma_send(unsigned char *data, uint16_t length)
+bool bus_uart1_dma_send(unsigned char *data, uint16_t length)
 {
-    if (!bus_port_to_host.idle) return; // 总线正在使用
+    const uint32_t irq = irq_save_wch();
+    if (!data || !length || length > 1280u || !bus_started || !bus_port_to_host.idle) {
+        irq_restore_wch(irq);
+        return false;
+    }
+    USART1->CTLR1 &= (uint16_t)~USART_Mode_Rx;
 
-    bus_port_to_host.idle = false; // 标记为忙碌
+    tx_deadline = time_ticks32() + ms_to_ticks32(100u);
+    bus_port_to_host.idle = false;
 
-    DMA1_Channel4->CFGR &= (uint16_t)(~DMA_CFGR1_EN); // 停止当前 DMA 传输
+    DMA1_Channel4->CFGR &= (uint16_t)(~DMA_CFGR1_EN);
 
-    DMA1_Channel4->MADDR = (uint32_t)data;  // 设置内存源地址
-    DMA1_Channel4->CNTR  = length;           // 设置传输长度
+    DMA1_Channel4->MADDR = (uint32_t)data;
+    DMA1_Channel4->CNTR  = length;
 
-    // DE = TX（拉高 PA12，切换到发送模式）
+    // DE = TX
     GPIOA->BSHR = GPIO_Pin_12;
 
-    // 清除 TC（传输完成）中断标志
+    // wyczyść TC
     USART_ClearITPendingBit(USART1, USART_IT_TC);
+    USART_ITConfig(USART1, USART_IT_TC, ENABLE);
+    DMA_ClearFlag(DMA1_FLAG_GL4);
 
-    USART1->CTLR3 |= USART_DMAReq_Tx; // 启用 USART DMA 发送请求
-    DMA1_Channel4->CFGR |= DMA_CFGR1_EN; // 启动 DMA 传输
+    USART1->CTLR3 |= USART_DMAReq_Tx;
+    __asm__ volatile("fence iorw, iorw" ::: "memory");
+    DMA1_Channel4->CFGR |= DMA_CFGR1_EN;
+    irq_restore_wch(irq);
+    return true;
 }
 
-/**
- * @brief USART1 中断服务程序
- * 
- * 处理两种中断源：
- * 
- * 1. RXNE（接收缓冲区非空）：
- *    - 读取接收到的字节
- *    - 仅在总线空闲时调用 IRQ 处理函数（避免在发送期间处理接收数据）
- * 
- * 2. TC（传输完成）：
- *    - DMA 发送完成，清除 TC 标志
- *    - 禁用 USART DMA 请求
- *    - 停止 DMA 通道
- *    - 拉低 DE 引脚（切换回接收模式）
- *    - 标记总线为空闲状态
- * 
- * @note 使用 WCH-Interrupt-fast 中断属性，减少中断响应延迟
- * @note 在 CH32V203 RISC-V MCU 上运行
- */
 extern "C" void USART1_IRQHandler(void) __attribute__((interrupt("WCH-Interrupt-fast")));
 void USART1_IRQHandler(void)
 {
-    if (USART_GetITStatus(USART1, USART_IT_RXNE) != RESET)
+    const uint16_t status = USART1->STATR;
+    if (!bus_port_to_host.idle && (status & USART_FLAG_TC))
     {
-        const uint8_t d = (uint8_t)USART_ReceiveData(USART1); // 读取接收数据（自动清除 RXNE）
-        if (bus_port_to_host.idle) uart1_port_irq(d);         // 仅在空闲时处理
-    }
-    if (USART_GetITStatus(USART1, USART_IT_TC) != RESET)
-    {
-        USART_ClearITPendingBit(USART1, USART_IT_TC);  // 清除 TC 标志
-        USART1->CTLR3 &= ~USART_DMAReq_Tx;             // 禁用 USART DMA 请求
-        DMA1_Channel4->CFGR &= (uint16_t)(~DMA_CFGR1_EN); // 停止 DMA 通道
-
-        // DE = RX（拉低 PA12，切换回接收模式）
-        GPIOA->BCR = GPIO_Pin_12;
-
-        // 标记总线为空闲
-        bus_port_to_host.idle = true;
+        // DE = RX
+        // TX done
+        if (DMA1_Channel4->CNTR == 0u) bus_tx_finish((DMA1->INTFR & DMA1_FLAG_TE4) != 0u);
+        else USART_ClearITPendingBit(USART1, USART_IT_TC);
     }
 }
 
-/* bmcu_link 依赖的总线接口桩函数（当前为无操作实现） */
+extern "C" void DMA1_Channel5_IRQHandler(void) __attribute__((interrupt("WCH-Interrupt-fast")));
+void DMA1_Channel5_IRQHandler(void)
+{
+    const uint32_t flags = DMA1->INTFR;
+    if (flags & DMA1_FLAG_TC5) {
+        DMA1->INTFCR = DMA1_FLAG_TC5;
+        ++rx_wraps;
+    }
+    if (flags & DMA1_FLAG_TE5) {
+        DMA1->INTFCR = DMA1_FLAG_TE5;
+        rx_fault = true;
+    }
+}
+
+extern "C" void DMA1_Channel4_IRQHandler(void) __attribute__((interrupt("WCH-Interrupt-fast")));
+void DMA1_Channel4_IRQHandler(void)
+{
+    if (DMA1->INTFR & DMA1_FLAG_TE4) {
+        if (!bus_port_to_host.idle) bus_tx_finish(true);
+        else DMA1->INTFCR = DMA1_FLAG_GL4;
+    }
+}
+
+/* bmcu_link 依赖的总线接口桩函数（V11 轮询架构下直接查询端口空闲状态） */
 bool bus_uart1_rx_transport_quiet() { return bus_port_to_host.idle; }
 bool bus_uart1_reset_transport_quiescent() { return bus_port_to_host.idle; }

@@ -54,11 +54,12 @@ public:
     void updata_stu();
 
     /**
-     * @brief 更新所有通道的原始角度值
+     * @brief 更新所有通道的原始角度值（V11: 新增有效通道位掩码返回值）
      * @details 读取AS5600原始角度寄存器(0x0C)，将12位角度值保存到raw_angle[]
-     *          同时更新online[]状态，读取失败的通道角度置0
+     *          同时更新online[]状态，读取失败的通道标记离线且角度保留上次值
+     * @return 有效通道位掩码 (bit0..3 对应 4 个通道)
      */
-    void updata_angle();
+    uint8_t updata_angle();
 
     /** @brief 各通道在线状态数组指针(指向online_buf)，true=传感器响应I2C */
     bool*               online;

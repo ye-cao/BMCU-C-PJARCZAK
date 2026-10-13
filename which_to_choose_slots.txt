@@ -6,11 +6,19 @@
 
 
 选择哪种槽位？
-可选：SOLO、AMS_A、AMS_B、AMS_C、AMS_D
+可选：AMS_AUTO、SOLO、AMS_A、AMS_B、AMS_C、AMS_D
 
+AMS_AUTO（上游 V11 新增）：由固件在总线上自动协商本机的 AMS 槽位编号，
+多机并联时无需为每个 BMCU 分别烧录不同槽位的固件，推荐优先尝试。
+若自动寻址在你的环境下工作不正常，再改用固定槽位固件（AMS_A~AMS_D）。
 
 --------------------------------------------------------------------------
 
+AMS_AUTO - recommended
+- Recommended for new installations.
+- Works like the original Bambu AMS addressing system.
+- BMCU units are enumerated automatically and receive their AMS number automatically.
+- Use this option unless AMS_AUTO does not work correctly with your setup.
 
 SOLO 固件
 示例文件：solo_0.095f.bin
@@ -62,6 +70,7 @@ P1 打印机用户注意：
 - 许多 P1 配置使用较长的 PTFE 路径，因此通常需要更长的回退距离。
 - 即使只有一个 BMCU，AMS_A 通常也比 SOLO 更合适（选择你需要的长度）。
 
+Measure the required retraction from the end of the AMS splitter and add a small safety margin so the filament fully clears the splitter.
 
 --------------------------------------------------------------------------
 

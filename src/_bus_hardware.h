@@ -97,17 +97,20 @@ public:
     uint8_t send_data_buf[1280] __attribute__((aligned(4))); /**< 发送数据构建缓冲区（主循环使用） */
 
 private:
-    uint8_t tx_dma_buf[1280] __attribute__((aligned(4)));    /**< DMA 发送缓冲区（DMA 传输时使用） */
-    uint8_t recv_data_buf[2][1280] __attribute__((aligned(4))); /**< 双接收缓冲区（ISR 和主循环交替使用） */
-    uint8_t tx_build_sel = 0;    /**< 发送缓冲区选择标志（0=send_data_buf, 1=tx_dma_buf） */
-    int _index = 0;              /**< 当前接收字节索引（ISR 内部状态） */
-    int length = 999;            /**< 当前数据包预期总长度（ISR 内部计算） */
-    uint8_t data_length_index = 0;  /**< 长度字段在包中的字节偏移（ISR 内部状态） */
-    uint8_t data_CRC8_index = 0;    /**< CRC8 校验字段在包中的字节偏移（ISR 内部状态） */
-    _bus_data_type irq_package_type = _bus_data_type::none; /**< ISR 中识别的协议类型 */
-    uint8_t *bus_irq_data_ptr = recv_data_buf[0];  /**< ISR 当前写入的接收缓冲区指针 */
-    int drop_bytes = 0;          /**< 需要丢弃的剩余字节数（心跳包快速处理时使用） */
-    void (*port_send_datas)(uint8_t *data, uint16_t len); /**< 发送函数指针（指向 DMA 发送函数） */
+    uint8_t tx_dma_buf[1280] __attribute__((aligned(4)));
+    uint8_t recv_data_buf[3][1280] __attribute__((aligned(4)));
+    uint8_t tx_build_sel = 0;
+    uint8_t rx_read = 0, rx_write = 0, rx_count = 0;
+    uint16_t rx_length[3] = {};
+    _bus_data_type rx_type[3] = {};
+    int _index = 0;
+    int length = 999;
+    uint8_t data_length_index = 0;
+    uint8_t data_CRC8_index = 0;
+    _bus_data_type irq_package_type = _bus_data_type::none;
+    uint8_t *bus_irq_data_ptr = recv_data_buf[0];
+    int heartbeat_drop_bytes = 0;
+    bool (*port_send_datas)(uint8_t *data, uint16_t len);
 
 public:
     bus_rx_metrics rx_metrics = {};
@@ -142,7 +145,7 @@ public:
     inline __attribute__((always_inline)) bool quiet_for_us(uint32_t microseconds) const
     {
         if (!idle || send_data_len != 0 || recv_data_len != 0) return false;
-        if (_index != 0 || drop_bytes != 0) return false;
+        if (_index != 0 || heartbeat_drop_bytes != 0) return false;
         if (!bus_uart1_reset_transport_quiescent()) return false;
         return static_cast<uint32_t>(time_ticks32() - last_activity_tick) >=
                microseconds * time_hw_tpus;
@@ -181,15 +184,7 @@ public:
         return tx_build_sel ? tx_dma_buf : send_data_buf;
     }
 
-    /**
-     * @brief 初始化总线端口处理模块
-     * 
-     * 重置所有内部状态，设置发送函数指针。
-     * 在系统启动时调用一次。
-     * 
-     * @param _port_send_datas 发送函数指针（指向 DMA 发送实现）
-     */
-    void init(void (*_port_send_datas)(uint8_t *data, uint16_t len))
+    void init(bool (*_port_send_datas)(uint8_t *data, uint16_t len))
     {
         _index = 0;
         length = 999;
@@ -197,8 +192,9 @@ public:
         data_CRC8_index = 0;
         irq_package_type = _bus_data_type::none;
         bus_irq_data_ptr = recv_data_buf[0];
-        drop_bytes = 0;
-        bus_recv_data_ptr = recv_data_buf[1]; // 主循环使用缓冲区 1
+        heartbeat_drop_bytes = 0;
+        bus_recv_data_ptr = recv_data_buf[0];
+        rx_read = rx_write = rx_count = 0;
         idle = true;
         last_activity_tick = time_ticks32();
         send_deferred = false;
@@ -210,59 +206,38 @@ public:
         port_send_datas = _port_send_datas;
     }
 
-    void reset_rx_parser()
+    uint32_t rx_dropped = 0;
+    volatile uint32_t tx_errors = 0;
+
+    void reset_rx()
     {
         _index = 0;
-        length = 999;
-        data_length_index = 0;
-        data_CRC8_index = 0;
+        heartbeat_drop_bytes = 0;
         irq_package_type = _bus_data_type::none;
-        drop_bytes = 0;
     }
 
-    /**
-     * @brief UART 接收中断处理函数（逐字节调用）
-     * 
-     * 状态机实现的数据包接收和解析：
-     * 
-     * 状态 0（等待魔数）：
-     *   - 检测 0x3D（BambuBus）或 0x33（AHUB）魔数
-     *   - 识别后初始化帧解析参数
-     * 
-     * 状态 1（帧标志解析）：
-     *   - 短帧（bit7=1）：长度字段在偏移 2，CRC8 在偏移 3
-     *   - 长帧（bit7=0）：长度字段在偏移 4 或 5（BambuBus）或偏移 4（AHUB）
-     * 
-     * 长度字段解析：
-     *   - BambuBus 短帧：1 字节长度
-     *   - BambuBus 长帧：2 字节长度（小端序）
-     *   - AHUB：1 字节长度 × 4 + 12
-     * 
-     * CRC8 校验：
-     *   - 在指定偏移处验证 CRC8，失败则丢弃包
-     * 
-     * 心跳包快速处理：
-     *   - BambuBus 短帧命令 0x20（心跳）：不等待完整包，直接丢弃剩余字节
-     *   - 调用 bambubus_heartbeat_seen_fast() 更新心跳时间
-     * 
-     * 包完成处理：
-     *   - 交换双缓冲指针（ISR 写入的缓冲区交给主循环读取）
-     *   - 设置 recv_data_len 和 bus_package_type
-     * 
-     * @param data 接收到的单个字节（由 USART 中断传入）
-     * 
-     * @note 此函数在 USART1 中断上下文中调用，执行时间需尽可能短
-     * @note 调用条件：bus_port_to_host.idle == true（总线空闲时才接收）
-     */
+    bool receiving() const { return _index != 0 || heartbeat_drop_bytes != 0; }
+
+    void release_packet()
+    {
+        if (rx_count) {
+            rx_read = (uint8_t)((rx_read + 1u) % 3u);
+            --rx_count;
+        }
+        bus_recv_data_ptr = recv_data_buf[rx_read];
+        bus_package_type = rx_count ? rx_type[rx_read] : _bus_data_type::none;
+        recv_data_len = rx_count ? rx_length[rx_read] : 0;
+    }
+
     void irq(uint8_t data)
     {
         note_activity();
         if (rx_metrics.rx_bytes != 0xFFFFFFFFu) ++rx_metrics.rx_bytes;
-        // 如果有需要丢弃的字节（心跳包快速处理后的剩余数据）
-        if (drop_bytes > 0)
+        // Heartbeat
+        if (__builtin_expect(heartbeat_drop_bytes > 0, 0))
         {
-            if (--drop_bytes == 0)
-                bambubus_heartbeat_seen_fast(); // 丢弃完毕，更新心跳时间
+            if (--heartbeat_drop_bytes == 0)
+                bambubus_heartbeat_seen_fast();
             return;
         }
 
@@ -329,8 +304,9 @@ public:
                 length = (((int)data) << 2) + 12;    // AHUB：长度 = 值×4 + 12
             }
 
-            // 长度有效性检查
-            if (length <= (int)data_CRC8_index || length > BUF_SZ)
+            const int minimum = irq_package_type == _bus_data_type::ahub_bus ? 12 :
+                (data_length_index == 2 ? 7 : 15);
+            if (length < minimum || length > BUF_SZ)
             {
                 if (rx_metrics.rx_bad_length != 0xFFFFFFFFu) ++rx_metrics.rx_bad_length;
                 _index = 0; // 长度无效，丢弃
@@ -338,7 +314,20 @@ public:
             }
         }
 
-        // CRC8 校验
+        if (irq_package_type == _bus_data_type::bambubus &&
+            idx == 4 && data_length_index == 2 && length >= 6 &&
+            buf[1] == 0xC5u && data == 0x20u)
+        {
+            const int remain = length - 5;
+            _index = 0;
+            irq_package_type = _bus_data_type::none;
+            if (remain > 0)
+                heartbeat_drop_bytes = remain;
+            else
+                bambubus_heartbeat_seen_fast();
+            return;
+        }
+
         if (idx == data_CRC8_index)
         {
             if (data != bus_crc8(buf, (uint32_t)data_CRC8_index))
@@ -350,29 +339,7 @@ public:
             }
         }
 
-        // 心跳包快速处理：BambuBus 短帧命令 0x20
-        if (irq_package_type == _bus_data_type::bambubus &&
-            idx == 4 &&
-            data_length_index == 2 &&
-            length >= 6 &&
-            buf[1] == 0xC5 &&
-            data == 0x20) // 命令号 0x20 = 心跳
-        {
-            const int remain = length - 5; // 剩余需要丢弃的字节数
-            _index = 0;
-
-            if (remain > 0)
-            {
-                drop_bytes = remain; // 设置丢弃计数，后续字节将被跳过
-            }
-            else
-            {
-                bambubus_heartbeat_seen_fast(); // 没有剩余字节，直接更新心跳
-            }
-            return;
-        }
-
-        ++idx; // 前进到下一个字节
+        ++idx;
 
         // 包接收完成
         if (idx >= length)
@@ -380,19 +347,23 @@ public:
             _index = 0;
             if (rx_metrics.rx_frames_valid != 0xFFFFFFFFu) ++rx_metrics.rx_frames_valid;
 
-            // 只有当主循环尚未读取上一个包时才更新（避免覆盖）
-            if (recv_data_len == 0)
+            if (rx_count < 2u)
             {
-                // 交换双缓冲指针
-                uint8_t *tmp = bus_recv_data_ptr;
-                bus_recv_data_ptr = bus_irq_data_ptr; // 主循环读取 ISR 写入的缓冲区
-                bus_irq_data_ptr = tmp;               // ISR 继续写入另一个缓冲区
-                bus_package_type = irq_package_type;
-                recv_data_len = length;
+                rx_length[rx_write] = (uint16_t)length;
+                rx_type[rx_write] = irq_package_type;
+                if (rx_count == 0u) {
+                    bus_recv_data_ptr = bus_irq_data_ptr;
+                    bus_package_type = irq_package_type;
+                    recv_data_len = length;
+                }
+                ++rx_count;
+                rx_write = (uint8_t)((rx_write + 1u) % 3u);
+                bus_irq_data_ptr = recv_data_buf[rx_write];
             }
-            else if (rx_metrics.rx_publish_drop != 0xFFFFFFFFu)
+            else
             {
-                ++rx_metrics.rx_publish_drop;
+                ++rx_dropped;
+                if (rx_metrics.rx_publish_drop != 0xFFFFFFFFu) ++rx_metrics.rx_publish_drop;
             }
             return;
         }
@@ -425,10 +396,10 @@ public:
             if (!idle || !send_is_ready()) return;
 
             uint8_t *tx = tx_build_buf();
-            tx_build_sel ^= 1;
-
-            port_send_datas(tx, (uint16_t)len);
-            send_data_len = 0;
+            if (port_send_datas(tx, (uint16_t)len)) {
+                tx_build_sel ^= 1;
+                send_data_len = 0;
+            }
         }
     }
 
@@ -455,6 +426,9 @@ extern _bus_port_deal bus_port_to_host;
 
 /** @brief 初始化总线硬件（CRC 外设、UART、DMA 等） */
 extern void bus_init();
+void bus_rx_poll();
+bool bus_background_ready();
+void bus_shutdown();
 
 /** @brief 无设备连接 */
 #define host_device_type_none 0x0000

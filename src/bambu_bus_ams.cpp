@@ -9,6 +9,9 @@
 #include "crc_bus.h"
 #include "ams_online_detect_policy.h"
 #include "bmcu_link.h"
+#include "ams_addressing.h"
+
+static_assert(BAMBU_BUS_AMS_NUM >= 0 && BAMBU_BUS_AMS_NUM <= 4, "invalid AMS index");
 
 /**
  * @brief AMS 编号到索引的映射表
@@ -41,7 +44,6 @@ static _filament_type bambubus_filament_id_to_type(const char *id)
         default:  return _filament_type::other;
     }
 }
-
 static void bambubus_build_static_serial(void);
 
 /**
@@ -52,12 +54,25 @@ static void bambubus_build_static_serial(void);
  */
 static uint32_t bambubus_heartbeat_deadline = 0u;
 
-/**
- * @brief 快速更新心跳截止时间
- * 
- * 在收到有效数据包时调用，将心跳截止时间刷新为当前时间 + 1000ms。
- * 此函数需在中断上下文或主循环中安全调用。
- */
+#if BMCU_AMS_AUTO
+static uint8_t auto_ams_num = 0u;
+static bool auto_arrange_wait = false;
+#endif
+
+uint8_t bambubus_ams_num(void)
+{
+#if BMCU_AMS_AUTO
+    return auto_ams_num;
+#else
+    return (uint8_t)BAMBU_BUS_AMS_NUM;
+#endif
+}
+
+uint8_t bambubus_local_ams_index(void)
+{
+    return (uint8_t)BMCU_LOCAL_AMS_INDEX;
+}
+
 void bambubus_heartbeat_seen_fast(void)
 {
     bambubus_heartbeat_deadline = time_ticks32() + ms_to_ticks32(1000u);
@@ -76,7 +91,7 @@ void bambubus_heartbeat_seen_fast(void)
  */
 bool package_check_crc16(uint8_t *data, int data_length)
 {
-    if (data_length < 4) return false;
+    if (!data || data_length < 7 || data_length > 1280) return false;
 
     const int crc_off = data_length - 2;                                    // CRC16 字段位于包尾倒数第 2 字节处
     const uint16_t num = bus_crc16(data, (uint32_t)crc_off);               // 计算 CRC16 校验值
@@ -92,11 +107,15 @@ bool package_check_crc16(uint8_t *data, int data_length)
  */
 void bambubus_init()
 {
+#if BMCU_AMS_AUTO
+    auto_ams_num = 0u;
+    auto_arrange_wait = false;
+#endif
     bambubus_build_static_serial();
     bambubus_heartbeat_deadline = 0u;
     // 标记本地 AMS 在线，否则 get_package_set_filament 中的 online 检查会跳过
-    const uint8_t fixed = (uint8_t)BAMBU_BUS_AMS_NUM;
-    ams[bambubus_ams_map[fixed]].online = true;
+    // 注意：AUTO 寻址下 BAMBU_BUS_AMS_NUM 为 4，不能直接用作数组下标，须走寻址函数
+    ams[bambubus_local_ams_index()].online = true;
 }
 
 /**
@@ -113,7 +132,9 @@ void bambubus_init()
  */
 void package_add_crc(uint8_t *data, int send_data_length)
 {
-    if (data[1] & 0x80) // 短帧：bit7=1
+    if (!data || send_data_length < 7 || send_data_length > 1280) return;
+    if (!(data[1] & 0x80) && send_data_length < 15) return;
+    if (data[1] & 0x80) // 获取数据包头位置
     {
         data[3] = bus_crc8(data, 3); // 短帧头校验：对前 3 字节计算 CRC8
     }
@@ -158,7 +179,8 @@ struct bambubus_long_packge_data
  */
 void bambubus_long_package_get(bambubus_long_packge_data *data)
 {
-    if (bus_port_to_host.send_data_len != 0) return; // 上一个包尚未发送完毕
+    if (!data || data->data_length > 1265u || (data->data_length && !data->datas)) return;
+    if (bus_port_to_host.send_data_len != 0) return;
     uint8_t* out = bus_port_to_host.tx_build_buf();
 
     out[0] = 0x3D; // BambuBus 魔数标识
@@ -204,16 +226,45 @@ static const ams_online_detect::Config g_online_detect_config = {
 };
 static uint8_t online_detect_prefix_now = 0x0Cu;
 
-/**
- * @brief 重置在线检测状态
- * 
- * 将在线检测相关的所有状态变量恢复为初始值。
- * 在 AMS 下线或重新初始化时调用。
- */
+bool bambubus_registered(void)
+{
+    return have_registered;
+}
+
+bool bambubus_arrange_wait(void)
+{
+#if BMCU_AMS_AUTO
+    return auto_arrange_wait;
+#else
+    return false;
+#endif
+}
+
+#if BMCU_AMS_AUTO
+static uint8_t online_detect_make_token(void)
+{
+    const volatile uint8_t *uid = (const volatile uint8_t *)0x1FFFF7E8u;
+    uint32_t h = time_ticks32();
+    for (uint8_t i = 0u; i < 12u; ++i)
+    {
+        h ^= uid[i];
+        h *= 0x01000193u;
+    }
+    uint8_t token = (uint8_t)(h & 0x1Fu);
+    return token ? token : 0x1Fu;
+}
+#endif
+
 static inline void online_detect_reset(void)
 {
-    ams_online_detect::reset(g_online_detect_state);
+    have_registered = false;
+#if BMCU_AMS_AUTO
+    online_detect_prefix_now = online_detect_make_token();
+#else
     online_detect_prefix_now = 0x0Cu;
+#endif
+    online_detect_phase = 0u;
+    ams_online_detect::reset(g_online_detect_state);
     bmcu_link_ams_registration_reset();
 }
 
@@ -231,26 +282,31 @@ static inline void online_detect_reset(void)
  */
 bambubus_package_type get_packge_type(unsigned char *buf, int length)
 {
-    if (length < 6) return bambubus_package_type::none;
-    if (buf[0] != 0x3D) return bambubus_package_type::none;         // 魔数校验
-    if (!package_check_crc16(buf, length)) return bambubus_package_type::none; // CRC16 校验
+    if (!buf || length < 7 || length > 1280) return bambubus_package_type::none;
+    if (buf[0] != 0x3D) return bambubus_package_type::none;
+    if (!package_check_crc16(buf, length)) return bambubus_package_type::none;
 
     if (buf[1] == 0xC5) // 短帧标志
     {
-        switch (buf[4]) // 命令号位于偏移 4
+        if (length != buf[2]) return bambubus_package_type::none;
+        switch (buf[4])
         {
         case 0x03:
-            return bambubus_package_type::filament_motion_short;    // 短帧耗材运动命令
+            if (length < 12) return bambubus_package_type::none;
+            return bambubus_package_type::filament_motion_short;
         case 0x04:
-            return bambubus_package_type::filament_motion_long;     // 长帧耗材状态命令
+            if (length < 13) return bambubus_package_type::none;
+            return bambubus_package_type::filament_motion_long;
         case 0x05:
-            return bambubus_package_type::online_detect;            // 在线检测
+            if (length < 8 || (buf[5] == 1u && length < 26)) return bambubus_package_type::none;
+            return bambubus_package_type::online_detect;
         case 0x06:
             return bambubus_package_type::REQx6;                    // 请求 0x06
         case 0x07:
             return bambubus_package_type::NFC_detect;               // NFC 检测
         case 0x08:
-            return bambubus_package_type::set_filament_info;        // 设置耗材信息
+            if (length < 45) return bambubus_package_type::none;
+            return bambubus_package_type::set_filament_info;
         case 0x20:
             return bambubus_package_type::heartbeat;                // 心跳包
         default:
@@ -259,23 +315,36 @@ bambubus_package_type get_packge_type(unsigned char *buf, int length)
     }
     else if ((buf[1] == 0x05) || (buf[1] == 0x04)) // 长帧标志
     {
-        if (length < 15) return bambubus_package_type::none;
-        bambubus_long_package_analysis(buf, length, &printer_data_long);
-        if (printer_data_long.target_address != host_device_type_ams) // 目标地址必须是 AMS
-        {
+        if (length < 15 || length != ((int)buf[4] | ((int)buf[5] << 8)))
             return bambubus_package_type::none;
+        bambubus_long_package_analysis(buf, length, &printer_data_long);
+
+        bool target_matches = (printer_data_long.target_address == host_device_type_ams);
+#if BMCU_AMS_AUTO
+        if (!target_matches && have_registered && !auto_arrange_wait)
+        {
+            const uint16_t slot_address = (uint16_t)(host_device_type_ams +
+                (uint16_t)0x0801u * (uint16_t)auto_ams_num);
+            target_matches = (printer_data_long.target_address == slot_address);
         }
+#endif
+        if (!target_matches)
+            return bambubus_package_type::none;
 
         switch (printer_data_long.type) // 命令类型码
         {
         case 0x21A:
-            return bambubus_package_type::MC_online;                // 主控在线确认
+            if (printer_data_long.data_length < 1u) return bambubus_package_type::none;
+            return bambubus_package_type::MC_online;
         case 0x211:
-            return bambubus_package_type::read_filament_info;       // 读取耗材信息
+            if (printer_data_long.data_length < 2u) return bambubus_package_type::none;
+            return bambubus_package_type::read_filament_info;
         case 0x218:
-            return bambubus_package_type::set_filament_info_type2;  // 设置耗材信息（长帧版本）
+            if (printer_data_long.data_length < 34u) return bambubus_package_type::none;
+            return bambubus_package_type::set_filament_info_type2;
         case 0x103:
-            return bambubus_package_type::version;                  // 版本查询
+            if (printer_data_long.data_length < 1u) return bambubus_package_type::none;
+            return bambubus_package_type::version;
         case 0x402:
             return bambubus_package_type::serial_number;            // 序列号查询
         default:
@@ -362,10 +431,11 @@ static constexpr uint8_t  kUseFlagActive   = 0x04u;
  */
 bool set_motion(unsigned char read_num, unsigned char statu_flags, unsigned char fliment_motion_flag, uint8_t ams_num)
 {
-    const uint8_t fixed_ams_num = (uint8_t)BAMBU_BUS_AMS_NUM;
-    if (ams_num != fixed_ams_num) return false; // AMS 编号不匹配，拒绝命令
+    const uint8_t fixed_ams_num = bambubus_ams_num();
+    const uint8_t local_ams_idx = bambubus_local_ams_index();
+    if (ams_num != fixed_ams_num) return false;
 
-    _ams *ams_ptr = &ams[bambubus_ams_map[fixed_ams_num]];
+    _ams *ams_ptr = &ams[local_ams_idx];
 
     if (read_num < 4) // 特定通道命令
     {
@@ -377,6 +447,11 @@ bool set_motion(unsigned char read_num, unsigned char statu_flags, unsigned char
         const bool is_stop_on_use   = ((statu_flags == 0x07) && (fliment_motion_flag == 0x00));   // 使用中停止
         const bool is_on_use        = ((statu_flags == 0x07) && (fliment_motion_flag == 0x7F));   // 使用中
         const bool is_before_pullb  = ((statu_flags == 0x09) && (fliment_motion_flag == 0x3F));   // 回退前准备
+
+        if (is_before_on_use &&
+            ams_ptr->filament[ch].motion != _filament_motion::send_out &&
+            ams_ptr->filament[ch].motion != _filament_motion::before_on_use)
+            return true;
 
         uint32_t &t_sendout_onuse = time_sendout_onuse_ticks[ch];
 
@@ -405,8 +480,8 @@ bool set_motion(unsigned char read_num, unsigned char statu_flags, unsigned char
                     ams_ptr->pressure = kPressureIdle;                              // 空闲状态压力值
                     time_sendout_onuse_ticks[prev] = 0u;
                 }
-                bus_now_ams_num = bambubus_ams_map[fixed_ams_num];
-                ams_ptr->now_filament_num = ch; // 切换到新通道
+                bus_now_ams_num = local_ams_idx;
+                ams_ptr->now_filament_num = ch;
             }
         }
 
@@ -415,6 +490,7 @@ bool set_motion(unsigned char read_num, unsigned char statu_flags, unsigned char
             // 送丝状态：耗材从料架送出
             t_sendout_onuse = 0u;
             count_on_use = 0u;
+            last_before_on_use_motion_flag = 0x00u;
 
             const _filament_motion prev = ams_ptr->filament[ch].motion;
 
@@ -454,7 +530,7 @@ bool set_motion(unsigned char read_num, unsigned char statu_flags, unsigned char
                 ams_ptr->pressure = (prev == _filament_motion::send_out) ? kPressureSendOut : kPressureActive;
             }
 
-            ams_state_set_loaded(ch);             // 标记该通道已装载
+            ams_state_claim_loaded(ch);
         }
         else if (is_stop_on_use)
         {
@@ -807,35 +883,21 @@ static uint8_t before_on_use_sniff_7f_index  = 0u;
 /** @brief 0x7F 嗅探回放适用的通道号 */
 static uint8_t before_on_use_sniff_7f_channel = 0xFFu;
 
-/**
- * @brief 处理打印机发来的短帧运动命令（命令号 0x03）
- * 
- * 解析打印机的运动命令，调用 set_motion() 更新耗材状态，
- * 然后构建并发送 AMS 短帧运动状态回复包。
- * 
- * 回复包包含：
- * - 当前耗材使用标志和通道号
- * - 计米值（耗材消耗长度）
- * - 压力传感器值
- * - 各通道在线/运动状态标志
- * 
- * 对于 0x7F 准备状态，还会回放嗅探数据表中的特定回复序列。
- * 
- * @param package_recv 指向接收到的打印机运动命令包
- */
-void get_package_motion(bambubus_printer_motion_package_struct *package_recv)
+void get_package_motion(bambubus_printer_motion_package_struct *package_recv, int length)
 {
-    if (bus_port_to_host.send_data_len != 0) return; // 上一个包尚未发送完毕
+    if (!package_recv || length < (int)sizeof(*package_recv)) return;
+    if (bus_port_to_host.send_data_len != 0) return;
     uint8_t *out = bus_port_to_host.tx_build_buf();
 
     bambubus_printer_motion_package_struct in;
     memcpy(&in, package_recv, sizeof(in));
 
-    const uint8_t fixed_ams_num = (uint8_t)BAMBU_BUS_AMS_NUM;
-    if (in.ams_num != fixed_ams_num) return; // AMS 编号不匹配
+    const uint8_t fixed_ams_num = bambubus_ams_num();
+    const uint8_t local_ams_idx = bambubus_local_ams_index();
+    if (in.ams_num != fixed_ams_num) return;
 
-    const uint8_t ams_idx = bambubus_ams_map[fixed_ams_num];
-    if (!ams[ams_idx].online) return; // AMS 未在线
+    const uint8_t ams_idx = local_ams_idx;
+    if (!ams[ams_idx].online) return;
 
     bmcu_link_ams_service_frame(0u); // kServiceMotion
 
@@ -858,7 +920,10 @@ void get_package_motion(bambubus_printer_motion_package_struct *package_recv)
 
     // 如果有通道在使用，复制计米值
     if (ch < 4u)
+    {
+        ams_ptr->filament[ch].meters = Motion_control_filament_meters(ch);
         memcpy(&package_send->meters, &ams_ptr->filament[ch].meters, sizeof(package_send->meters));
+    }
 
     memcpy(&package_send->pressure, &pressure, sizeof(pressure));
 
@@ -1026,25 +1091,9 @@ static const bambubus_ams_stu_motion_package_struct _bambubus_ams_stu_motion_pac
     0xFFFFFFFF,    // last4
     0x0000          // crc16
 };
-
-/**
- * @brief 处理打印机发来的长帧运动状态命令（命令号 0x04）
- * 
- * 解析打印机的运动命令，计算 4 个耗材通道的平均温度和湿度，
- * 调用 set_motion() 更新耗材状态，然后构建并发送 AMS 长帧运动状态回复包。
- * 
- * 温度计算：4 个通道温度之和 × 10 / 4（转换为 0.1°C 单位的平均值）
- * 湿度计算：4 个通道湿度之和 / 4（取平均值）
- * 
- * 回复包还包含：
- * - 温度和湿度数据
- * - 各通道在线标志
- * - 当前耗材使用状态和压力值
- * 
- * @param package_recv 指向接收到的打印机长帧运动命令包
- */
-void get_package_stu_motion(bambubus_printer_stu_motion_package_struct *package_recv)
+void get_package_stu_motion(bambubus_printer_stu_motion_package_struct *package_recv, int length)
 {
+    if (!package_recv || length < (int)sizeof(*package_recv)) return;
     if (bus_port_to_host.send_data_len != 0) return;
     uint8_t *out = bus_port_to_host.tx_build_buf();
 
@@ -1054,10 +1103,11 @@ void get_package_stu_motion(bambubus_printer_stu_motion_package_struct *package_
     unsigned char filament_flag_on  = 0x00;  // 在线耗材标志
     unsigned char filament_flag_NFC = 0x00;  // NFC 读取标志
 
-    const uint8_t fixed_ams_num = (uint8_t)BAMBU_BUS_AMS_NUM;
+    const uint8_t fixed_ams_num = bambubus_ams_num();
+    const uint8_t local_ams_idx = bambubus_local_ams_index();
     if (in.ams_num != fixed_ams_num) return;
 
-    const uint8_t ams_idx = bambubus_ams_map[fixed_ams_num];
+    const uint8_t ams_idx = local_ams_idx;
     if (!ams[ams_idx].online) return;
 
     bmcu_link_ams_service_frame(1u); // kServiceStuMotion
@@ -1118,7 +1168,10 @@ void get_package_stu_motion(bambubus_printer_stu_motion_package_struct *package_
     package_send->filament_channel = ch;
 
     if (ch < 4)
+    {
+        ams_ptr->filament[ch].meters = Motion_control_filament_meters(ch);
         memcpy(&package_send->meters, &ams_ptr->filament[ch].meters, sizeof(package_send->meters));
+    }
 
     memcpy(&package_send->pressure, &pressure, sizeof(pressure));
 
@@ -1192,14 +1245,29 @@ static inline void online_detect_build_packet(const uint8_t ams_num, const uint8
  */
 void get_package_online_detect(unsigned char *buf, int length)
 {
-    (void)length;
+    if (!buf || length < 8) return;
+
+#if BMCU_AMS_AUTO
+    if (buf[5] == 0x03u)
+    {
+        if (length < 9 || buf[6] != 0xFFu) return;
+        auto_arrange_wait = true;
+        have_registered = false;
+        auto_ams_num = 0u;
+        online_detect_phase = 0u;
+        return;
+    }
+
+    if (auto_arrange_wait) return;
+#endif
+
     if (bus_port_to_host.send_data_len != 0) return;
 
-    const uint8_t ams_num = (uint8_t)BAMBU_BUS_AMS_NUM;
-    if (ams_num >= 4u) return;
+    const uint8_t ams_num = bambubus_ams_num();
+    const uint8_t local_ams_idx = bambubus_local_ams_index();
+    if (ams_num >= 4u || local_ams_idx >= 4u) return;
 
-    // AMS 未在线，重置检测状态
-    if (ams[bambubus_ams_map[ams_num]].online != true)
+    if (ams[local_ams_idx].online != true)
     {
         online_detect_reset();
         return;
@@ -1207,18 +1275,24 @@ void get_package_online_detect(unsigned char *buf, int length)
 
     bmcu_link_ams_registration_query();
 
-    if (buf[5] == 0x00) // 子类型 0x00：打印机检测阶段
+    if (buf[5] == 0x00u)
     {
-        ams_online_detect::poll(g_online_detect_state, g_online_detect_config, time_ticks32());
-        const ams_online_detect::QueryAction action = ams_online_detect::on_query(g_online_detect_state);
+        if (have_registered) return;
 
-        if (action == ams_online_detect::QueryAction::stay_silent)
-            return;
+#if !BMCU_AMS_AUTO
+        if (online_detect_phase == 0u)
+        {
+            online_detect_prefix_now = 0x0Cu;
+            online_detect_phase = 1u;
+        }
+        else
+        {
+            online_detect_prefix_now = 0x0Au;
+            online_detect_phase = 2u;
+        }
+#endif
 
-        online_detect_prefix_now = (action == ams_online_detect::QueryAction::offer_first)
-            ? 0x0Cu : 0x0Au;
-
-        online_detect_build_packet(ams_num, 0x00);
+        online_detect_build_packet(ams_num, 0x00u);
 
         uint8_t *out = bus_port_to_host.tx_build_buf();
         memcpy(out, online_detect_res, 29);
@@ -1226,17 +1300,35 @@ void get_package_online_detect(unsigned char *buf, int length)
         return;
     }
 
-    if (buf[5] != 0x01) return;   // 只处理子类型 0x01
-    if (buf[6] != ams_num) return; // AMS 编号必须匹配
+    if (buf[5] != 0x01u || length < 26) return;
+
+#if BMCU_AMS_AUTO
+    if (buf[6] > 3u) return;
+    online_detect_build_packet(ams_num, 0x01u);
+    if (buf[7] != online_detect_prefix_now ||
+        memcmp(online_detect_res + 8, buf + 8, 16) != 0)
+        return;
+
+    auto_ams_num = buf[6];
+    have_registered = true;
+    online_detect_phase = 3u;
+
+    long_packge_version_serial_number[65] = auto_ams_num;
+    online_detect_build_packet(auto_ams_num, 0x01u);
+#else
+    if (buf[6] != ams_num) return;
 
     online_detect_prefix_now = 0x0Au;
-    online_detect_build_packet(ams_num, 0x01);
+    online_detect_build_packet(ams_num, 0x01u);
 
     // 验证打印机回复中的前缀和设备标识是否匹配
     if (memcmp(online_detect_res + 7, buf + 7, 17) != 0)
         return;
 
-    ams_online_detect::latch_confirm(g_online_detect_state, time_ticks32());
+        have_registered = true;
+        online_detect_phase = 3u;
+#endif
+
     bmcu_link_ams_registration_confirm();
 
     uint8_t *out = bus_port_to_host.tx_build_buf();
@@ -1269,11 +1361,12 @@ void get_package_long_packge_MC_online(unsigned char *buf, int length)
     (void)buf;
     (void)length;
 
-    const uint8_t fixed_ams_num = (uint8_t)BAMBU_BUS_AMS_NUM;
+    const uint8_t fixed_ams_num = bambubus_ams_num();
+    const uint8_t local_ams_idx = bambubus_local_ams_index();
 
     if (printer_data_long.data_length < 1u) return;
-    if (!ams[bambubus_ams_map[fixed_ams_num]].online) return;
-    if (printer_data_long.datas[0] != fixed_ams_num) return; // 验证 AMS 编号
+    if (!ams[local_ams_idx].online) return;
+    if (printer_data_long.datas[0] != fixed_ams_num) return;
 
     bmcu_link_ams_service_frame(2u); // kServiceMcOnline
 
@@ -1319,25 +1412,25 @@ unsigned char long_packge_filament[] =
  */
 void get_package_long_packge_filament(unsigned char *buf, int length)
 {
+    if (printer_data_long.data_length < 2u) return;
     (void)buf;
     (void)length;
 
     bambubus_long_packge_data data;
 
-    const uint8_t fixed_ams_num = (uint8_t)BAMBU_BUS_AMS_NUM;
-    const uint8_t ams_num = printer_data_long.datas[0];     // 目标 AMS 编号
-    const uint8_t filament_num = printer_data_long.datas[1]; // 目标通道号
+    const uint8_t fixed_ams_num = bambubus_ams_num();
+    const uint8_t local_ams_idx = bambubus_local_ams_index();
+    const uint8_t ams_num = printer_data_long.datas[0];
+    const uint8_t filament_num = printer_data_long.datas[1];
 
-    // 验证 AMS 编号和通道号
-    if (ams_num != fixed_ams_num || filament_num >= 4 || ams[bambubus_ams_map[fixed_ams_num]].online != true)
+    if (ams_num != fixed_ams_num || filament_num >= 4 || ams[local_ams_idx].online != true)
     {
         return;
     }
 
-    _ams *ams_ptr = ams + bambubus_ams_map[fixed_ams_num];
-    long_packge_filament[0] = fixed_ams_num;    // 填充 AMS 编号
-    long_packge_filament[1] = filament_num;     // 填充通道号
-    // 复制耗材 ID（8 字节）
+    _ams *ams_ptr = ams + local_ams_idx;
+    long_packge_filament[0] = fixed_ams_num;
+    long_packge_filament[1] = filament_num;
     memcpy(long_packge_filament + 19, ams_ptr->filament[filament_num].bambubus_filament_id, sizeof(ams_ptr->filament[filament_num].bambubus_filament_id));
     // 复制耗材名称（20 字节）
     memcpy(long_packge_filament + 27, ams_ptr->filament[filament_num].name, sizeof(ams_ptr->filament[filament_num].name));
@@ -1397,8 +1490,9 @@ unsigned char long_packge_version_serial_number[] = {15,
 static void bambubus_build_static_serial(void)
 {
     static const char hex[] = "0123456789ABCDEF";
-    volatile const uint8_t *uid = (volatile const uint8_t *)0x1FFFF7E8; // CH32V203 芯片唯一 ID 地址
-    const uint8_t ams_num = (uint8_t)BAMBU_BUS_AMS_NUM;
+    volatile const uint8_t *uid = (volatile const uint8_t *)0x1FFFF7E8;
+
+    const uint8_t ams_num = (uint8_t)(BMCU_AMS_AUTO ? 0u : BAMBU_BUS_AMS_NUM);
 
     // FNV-1a 哈希初始化
     uint64_t v = 1469598103934665603ull;
@@ -1482,7 +1576,8 @@ void get_package_long_packge_serial_number(unsigned char *buf, int length)
     (void)buf;
     (void)length;
 
-    const uint8_t ams_num = (uint8_t)BAMBU_BUS_AMS_NUM;
+    const uint8_t ams_num = bambubus_ams_num();
+    const uint8_t local_ams_idx = bambubus_local_ams_index();
 
     // 验证请求中的 AMS 编号
     if ((printer_data_long.data_length > 33) && (printer_data_long.datas[33] != ams_num))
@@ -1490,25 +1585,30 @@ void get_package_long_packge_serial_number(unsigned char *buf, int length)
         return;
     }
 
-    if (ams[bambubus_ams_map[ams_num]].online != true)
+    if (ams[local_ams_idx].online != true)
     {
         return;
     }
 
-    // 构建长帧回复
+    long_packge_version_serial_number[65] = ams_num;
+
     bambubus_long_packge_data data;
     data.datas = long_packge_version_serial_number;
     data.data_length = sizeof(long_packge_version_serial_number);
     bambubus_long_reply(&data);
 }
 
-/**
- * @brief 版本号和设备名称回复数据包（AMS08 型号）
- * 
- * 包含固件版本号（50 = 0x32）和设备型号名称 "AMS08"。
- * 版本号采用 BCD 编码：0x0A=10, 0x14=20, 0x1E=30, 0x28=40, 0x32=50
- */
-unsigned char long_packge_version_version_and_name_AMS08[] = {0x00, 0x06, 0x05, 0x0A , // 版本号 10.05.06.00 (倒序+十进制)
+//0x0A // 10
+//0x0B // 11
+//0x14 // 20
+//0x1E // 30
+//0x28 // 40
+//0x32 // 50
+//0x3C // 60
+//0x46 // 70
+//0x50 // 80
+//0x5A // 90
+unsigned char long_packge_version_version_and_name_AMS08[] = {0x00, 0x00, 0x00, 0x0B , // verison number
                                                               0x41, 0x4D, 0x53, 0x30, 0x38, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
 
 /**
@@ -1522,13 +1622,15 @@ unsigned char long_packge_version_version_and_name_AMS08[] = {0x00, 0x06, 0x05, 
  */
 void get_package_long_packge_version(unsigned char *buf, int length)
 {
+    if (printer_data_long.data_length < 1u) return;
     (void)buf;
     (void)length;
 
-    const uint8_t fixed_ams_num = (uint8_t)BAMBU_BUS_AMS_NUM;
+    const uint8_t fixed_ams_num = bambubus_ams_num();
+    const uint8_t local_ams_idx = bambubus_local_ams_index();
     const uint8_t ams_num = printer_data_long.datas[0];
 
-    if (ams_num != fixed_ams_num || ams[bambubus_ams_map[fixed_ams_num]].online != true)
+    if (ams_num != fixed_ams_num || ams[local_ams_idx].online != true)
         return;
 
     // 在版本数据末尾填入 AMS 编号
@@ -1560,20 +1662,20 @@ unsigned char set_filament_res[] = {0x3D, 0xC0, 0x08, 0xB2, 0x08, 0x60, 0xB4, 0x
  */
 void get_package_set_filament(unsigned char *buf, int length)
 {
-    (void)length;
+    if (!buf || length < 45) return;
 
     if (bus_port_to_host.send_data_len != 0) return;
     uint8_t* out = bus_port_to_host.tx_build_buf();
     uint8_t b = buf[5]; // AMS 编号和通道号编码在 buf[5] 中
 
-    const uint8_t fixed_ams_num = (uint8_t)BAMBU_BUS_AMS_NUM;
-    uint8_t ams_num  = (b >> 4) & 0x0F;   // 高 4 位为 AMS 编号
-    uint8_t read_num = (b >> 0) & 0x0F;   // 低 4 位为通道号
+    const uint8_t fixed_ams_num = bambubus_ams_num();
+    const uint8_t local_ams_idx = bambubus_local_ams_index();
+    uint8_t ams_num  = (b >> 4) & 0x0F;
+    uint8_t read_num = (b >> 0) & 0x0F;
 
-    if (ams_num != fixed_ams_num || read_num >= 4 || ams[bambubus_ams_map[fixed_ams_num]].online != true) return;
+    if (ams_num != fixed_ams_num || read_num >= 4 || ams[local_ams_idx].online != true) return;
 
-    _ams *ams_ptr = ams + bambubus_ams_map[fixed_ams_num];
-    // 复制耗材 ID（8 字节，从 buf[7] 开始）
+    _ams *ams_ptr = ams + local_ams_idx;
     memcpy(ams_ptr->filament[read_num].bambubus_filament_id, buf + 7, sizeof(ams_ptr->filament[read_num].bambubus_filament_id));
     // 复制 RGBA 颜色值
     ams_ptr->filament[read_num].color_R = buf[15];
@@ -1617,19 +1719,21 @@ unsigned char set_filament_res_type2[] = {0x00, 0x00, 0x00};
  */
 void get_package_set_filament_type2(unsigned char *buf, int length)
 {
+    if (printer_data_long.data_length < 34u) return;
     if (bus_port_to_host.send_data_len != 0) return;
     (void)buf;
     (void)length;
 
     bambubus_long_packge_data data;
 
-    const uint8_t fixed_ams_num = (uint8_t)BAMBU_BUS_AMS_NUM;
-    const uint8_t ams_num  = printer_data_long.datas[0]; // AMS 编号
-    const uint8_t read_num = printer_data_long.datas[1]; // 通道号
+    const uint8_t fixed_ams_num = bambubus_ams_num();
+    const uint8_t local_ams_idx = bambubus_local_ams_index();
+    const uint8_t ams_num  = printer_data_long.datas[0];
+    const uint8_t read_num = printer_data_long.datas[1];
 
-    if (ams_num != fixed_ams_num || read_num >= 4 || ams[bambubus_ams_map[fixed_ams_num]].online != true) return;
+    if (ams_num != fixed_ams_num || read_num >= 4 || ams[local_ams_idx].online != true) return;
 
-    _ams *ams_ptr = ams + bambubus_ams_map[fixed_ams_num];
+    _ams *ams_ptr = ams + local_ams_idx;
 
     // 复制耗材 ID（8 字节，从 datas[2] 开始）
     memcpy(ams_ptr->filament[read_num].bambubus_filament_id,
@@ -1706,77 +1810,102 @@ bambubus_package_type bambubus_run()
     // 检查是否收到有效的 BambuBus 数据包
     if (rx_len > 0 && t == _bus_data_type::bambubus)
     {
+        bool consume_packet = false;
+
         if (buf != nullptr && rx_len <= 1280 && buf[0] == 0x3D)
         {
             const int len = rx_len;
+            stu = get_packge_type(buf, len);
 
-            stu = get_packge_type(buf, len); // 解析包类型
+#if BMCU_AMS_AUTO
+            const bool arrange_cmd =
+                (stu == bambubus_package_type::online_detect) &&
+                (len >= 9) && (buf[5] == 0x03u) && (buf[6] == 0xFFu);
 
-            // 根据包类型分发到对应的处理函数
-            switch (stu)
+            if (arrange_cmd && bus_port_to_host.send_data_len != 0)
+                bus_port_to_host.send_data_len = 0;
+
+            const bool auto_cmd_allowed =
+                (stu == bambubus_package_type::online_detect);
+            const bool auto_normal_ready = have_registered && !auto_arrange_wait;
+#else
+            const bool arrange_cmd = false;
+            const bool auto_cmd_allowed = true;
+            const bool auto_normal_ready = true;
+#endif
+
+            if (bus_port_to_host.send_data_len == 0 || arrange_cmd)
             {
-            case bambubus_package_type::filament_motion_short:
-                get_package_motion((bambubus_printer_motion_package_struct *)buf);
-                break;
+                consume_packet = true;
 
-            case bambubus_package_type::filament_motion_long:
-                get_package_stu_motion((bambubus_printer_stu_motion_package_struct *)buf);
-                break;
+                if (auto_cmd_allowed || auto_normal_ready)
+                {
+                    switch (stu)
+                    {
+                    case bambubus_package_type::filament_motion_short:
+                        get_package_motion((bambubus_printer_motion_package_struct *)buf, len);
+                        break;
 
-            case bambubus_package_type::online_detect:
-                get_package_online_detect(buf, len);
-                break;
+                    case bambubus_package_type::filament_motion_long:
+                        get_package_stu_motion((bambubus_printer_stu_motion_package_struct *)buf, len);
+                        break;
 
-            case bambubus_package_type::MC_online:
-                get_package_long_packge_MC_online(buf, len);
-                break;
+                    case bambubus_package_type::online_detect:
+                        get_package_online_detect(buf, len);
+                        break;
 
-            case bambubus_package_type::read_filament_info:
-                get_package_long_packge_filament(buf, len);
-                break;
+                    case bambubus_package_type::MC_online:
+                        get_package_long_packge_MC_online(buf, len);
+                        break;
 
-            case bambubus_package_type::version:
-                get_package_long_packge_version(buf, len);
-                break;
+                    case bambubus_package_type::read_filament_info:
+                        get_package_long_packge_filament(buf, len);
+                        break;
 
-            case bambubus_package_type::serial_number:
-                get_package_long_packge_serial_number(buf, len);
-                break;
+                    case bambubus_package_type::version:
+                        get_package_long_packge_version(buf, len);
+                        break;
 
-            case bambubus_package_type::set_filament_info:
-            {
-                const uint8_t b = buf[5];
-                const uint8_t ams_num = (b >> 4) & 0x0F;
-                const uint8_t fil = (b >> 0) & 0x0F;
+                    case bambubus_package_type::serial_number:
+                        get_package_long_packge_serial_number(buf, len);
+                        break;
 
-                get_package_set_filament(buf, len);
+                    case bambubus_package_type::set_filament_info:
+                    {
+                        const uint8_t b = buf[5];
+                        const uint8_t ams_num = (b >> 4) & 0x0F;
+                        const uint8_t fil = (b >> 0) & 0x0F;
 
-                // 如果是当前 AMS 且通道号有效，触发保存操作
-                if (ams_num == (uint8_t)BAMBU_BUS_AMS_NUM && fil < 4)
-                    ams_datas_set_need_to_save_filament(fil);
-                break;
+                        get_package_set_filament(buf, len);
+
+                        if (ams_num == bambubus_ams_num() && fil < 4)
+                            ams_datas_set_need_to_save_filament(fil);
+                        break;
+                    }
+
+                    case bambubus_package_type::set_filament_info_type2:
+                        get_package_set_filament_type2(buf, len);
+                        if (printer_data_long.datas[0] == bambubus_ams_num() && printer_data_long.datas[1] < 4)
+                            ams_datas_set_need_to_save_filament(printer_data_long.datas[1]);
+                        break;
+
+                    default:
+                        break;
+                    }
+
+                    if (bus_port_to_host.send_data_len != 0) delay_us(50u);
+                }
             }
-
-            case bambubus_package_type::set_filament_info_type2:
-                get_package_set_filament_type2(buf, len);
-                // 如果是当前 AMS 且通道号有效，触发保存操作
-                if (printer_data_long.datas[0] == (uint8_t)BAMBU_BUS_AMS_NUM && printer_data_long.datas[1] < 4)
-                    ams_datas_set_need_to_save_filament(printer_data_long.datas[1]);
-                break;
-
-            default:
-                break;
-            }
-
-            // 等待 50μs 确保回复包发送完成
-            if (bus_port_to_host.send_data_len != 0) delay_us(50u);
+        }
+        else if (bus_port_to_host.send_data_len == 0)
+        {
+            consume_packet = true;
         }
 
-        // 临界区：清空接收缓冲区
+        if (consume_packet)
         {
             const uint32_t s = irq_save_wch();
-            bus_port_to_host.recv_data_len = 0;
-            bus_port_to_host.bus_package_type = _bus_data_type::none;
+            bus_port_to_host.release_packet();
             irq_restore_wch(s);
         }
     }

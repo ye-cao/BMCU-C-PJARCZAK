@@ -18,6 +18,7 @@
 #include "ws2812.h"
 #include "hal/time_hw.h"
 #include "hal/irq_wch.h"
+#include "_bus_hardware.h"
 
 // WS2812B 时序参数 (数据手册):
 //  - TH+TL = 1.25us ±600ns
@@ -206,7 +207,8 @@ void WS2812_class::RST(void)
  */
 void WS2812_class::updata(void)
 {
-    if (!dirty) return;
+    // V11: Flash 后台写入/总线未就绪期间跳过 LED 刷新，避免时序被破坏
+    if (!dirty || time_hw_slow || !bus_background_ready()) return;
 
     GPIO_TypeDef* const p = port;
     const uint32_t      m = (uint32_t)pin;

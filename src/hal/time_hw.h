@@ -41,6 +41,13 @@ extern "C" {
 void time_hw_init(void);
 
 /**
+ * @brief 动态切换系统时钟快慢（V11 新增：NVM 写入期间降频，保证 Flash 操作安全）
+ * @param slow 非0 = 降频到72MHz；0 = 恢复144MHz
+ * @details 切换时自动补偿时基偏移，保证 time_ticks32/time_ms64 时间连续不回跳
+ */
+void time_hw_flash_clock(uint32_t slow);
+
+/**
  * @brief 获取每微秒对应的tick数
  * @return 每微秒的tick数(如72MHz/8=9 → 9 ticks/us)
  */
@@ -57,6 +64,9 @@ extern uint32_t time_hw_tpus;
 
 /** @brief 每毫秒的tick数(全局变量，由time_hw_init()计算) */
 extern uint32_t time_hw_tpms;
+extern volatile uint32_t time_hw_slow;
+extern volatile uint32_t time_hw_offset32;
+extern volatile uint32_t time_hw_anchor32;
 
 /**
  * @brief 计算两个32位无符号时间戳的差值(a - b)
@@ -136,7 +146,8 @@ static inline __attribute__((always_inline)) uint32_t us_to_ticks32(uint32_t us)
  */
 static inline __attribute__((always_inline)) uint32_t time_ticks32(void)
 {
-    return STK_CNTL;
+    const uint32_t raw = STK_CNTL;
+    return raw + time_hw_offset32 + (time_hw_slow ? raw - time_hw_anchor32 : 0u);
 }
 
 /**
@@ -166,6 +177,7 @@ uint64_t time_ms64(void);
 static inline __attribute__((always_inline)) void delayTicks32(uint32_t ticks)
 {
     if (!ticks) return;
+    if (time_hw_slow) ticks = (ticks >> 1) + (ticks & 1u);
     const uint32_t t0 = STK_CNTL;
     while ((uint32_t)(STK_CNTL - t0) < ticks) {
         __asm__ volatile ("nop");   // 空指令，避免编译器优化

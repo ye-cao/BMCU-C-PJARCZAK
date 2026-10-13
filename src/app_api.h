@@ -48,6 +48,7 @@ void MC_PULL_ONLINE_RGB_set(uint8_t ch, uint8_t r, uint8_t g, uint8_t b, bool fi
  * @details 通知AMS模块该料盘的数据(如类型、颜色等)已更新，需要写入Flash
  */
 void ams_datas_set_need_to_save_filament(uint8_t filament_idx);
+void ams_state_claim_loaded(uint8_t filament_ch);
 
 /**
  * @brief 设置指定通道的AMS状态为"已装料"
@@ -69,3 +70,5 @@ void ams_state_set_unloaded(uint8_t filament_ch);
  * @details 查询AMS状态机，返回当前处于"已装料"状态的通道编号
  */
 uint8_t ams_state_get_loaded(void);
+
+float Motion_control_filament_meters(uint8_t ch);

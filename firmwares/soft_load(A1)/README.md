@@ -47,6 +47,12 @@ AUTOLOAD 工作原理
   （挤出机后面的开关）来确认"完全插入"状态。
 - 耗材完全进入挤出机后，第二阶段工作方式相同。
 
+- After "fully in" is confirmed, the BMCU feeds about 12 cm (120 mm) of filament forward.
+- This completes the full pass through the BMCU so the filament is seated and ready for printing.
+- During this feed it monitors the buffer position. If the filament snags on the buffer housing or the PTFE tube edge (buffer rises too much), it protects the mechanism:
+  - retracts to a safe buffer position,
+  - tries again (up to 2 retries).
+- On the 3rd snag (final failure) it retracts further, backs the filament out, and stops. Manual intervention is required.
 
 --------------------------------------------------------------------------
 

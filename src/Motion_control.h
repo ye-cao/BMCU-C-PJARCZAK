@@ -16,6 +16,7 @@
 #pragma once
 #include <stdint.h>
 #include <stdbool.h>
+#include "ams_addressing.h"
 
 /**
  * @brief 初始化运动控制模块
@@ -69,6 +70,13 @@ float Motion_control_get_filament_meters(uint8_t channel);
  */
 void MC_PULL_detect_channels_inserted();
 
+/**
+ * @brief 检测指定通道是否有耗材在位（V11 新增，启动时用于校验 NVM 恢复的加载状态）
+ * @param ch 通道编号（0..3）
+ * @return true 该通道检测到耗材
+ */
+bool Motion_control_filament_present(uint8_t ch);
+
 /* ==================== 外部变量声明 ==================== */
 
 /** @brief 各通道速度传感器的电压偏移补偿量（单位：V） */
@@ -95,12 +103,10 @@ extern bool    filament_channel_inserted[4];
 /* ==================== 编译时配置宏 ==================== */
 
 /**
- * @brief BambuBus AMS 编号（0~3），通过 platformio.ini 的 -DBAMBU_BUS_AMS_NUM 指定
- *        用于选择当前 BMCU-C 控制的是哪个 AMS 单元
+ * @brief BambuBus AMS 编号，通过 platformio.ini 的 -DBAMBU_BUS_AMS_NUM 指定
+ *        0~3 = 固定槽位 A~D；4 = AUTO 自动寻址（V11 新增，多台 BMCU 自动枚举分配地址）
+ *        宏定义与取值范围校验统一由 ams_addressing.h 提供
  */
-#ifndef BAMBU_BUS_AMS_NUM
-#define BAMBU_BUS_AMS_NUM 0
-#endif
 
 /**
  * @brief AMS 回退长度（单位：米），通过 platformio.ini 的 -DAMS_RETRACT_LEN 指定
@@ -129,7 +135,7 @@ extern bool    filament_channel_inserted[4];
 
 /** @brief 运动控制使用的 AMS 编号（内部使用） */
 #ifndef motion_control_ams_num
-#define motion_control_ams_num BAMBU_BUS_AMS_NUM
+#define motion_control_ams_num BMCU_LOCAL_AMS_INDEX
 #endif
 
 /** @brief 耗材回退距离（单位：米，内部使用） */
@@ -137,7 +143,3 @@ extern bool    filament_channel_inserted[4];
 #define motion_control_pull_back_distance AMS_RETRACT_LEN
 #endif
 
-/** @brief 编译时校验：AMS 编号必须在 0~3 范围内 */
-#if (BAMBU_BUS_AMS_NUM < 0) || (BAMBU_BUS_AMS_NUM > 3)
-#error "BAMBU_BUS_AMS_NUM must be in range 0..3"
-#endif

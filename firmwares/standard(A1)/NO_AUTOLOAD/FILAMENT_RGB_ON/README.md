@@ -6,26 +6,21 @@
 
 
 选择哪种槽位？
-可选：SOLO、AMS_A、AMS_B、AMS_C、AMS_D
+可选：AMS_AUTO、SOLO、AMS_A、AMS_B、AMS_C、AMS_D
 
 
---------------------------------------------------------------------------
+### AMS_AUTO —— 推荐
 
+- 新装机推荐优先使用。
+- 工作方式与 Bambu 原厂 AMS 寻址系统一致。
+- 多个 BMCU 会被自动枚举，并自动获得各自的 AMS 编号。
+- 除非 AMS_AUTO 在你的环境下工作不正常，否则请使用此选项。
 
-SOLO 固件
-示例文件：solo_0.095f.bin
+### AMS_A / AMS_B / AMS_C / AMS_D —— 旧版
 
-此固件用于单 BMCU 独立工作。
-推荐用于单 BMCU 配置。
-
-耗材回退长度：
-- 0.095 米 = 9.5 厘米
-
-
-AMS_A / AMS_B / AMS_C / AMS_D 固件
-这些固件版本适用于：
-- 多 BMCU 配置
-- 需要更长的耗材回退距离
+- 旧的手工指定 AMS 槽位固件。
+- 仅在 AMS_AUTO 工作不正常时使用。
+- 每个 BMCU 必须使用不同的槽位：AMS_A、AMS_B、AMS_C 或 AMS_D。
 
 如果你只有一个 BMCU 但需要比 SOLO 更长的回退距离，
 请使用 AMS_A 而不是 SOLO。
