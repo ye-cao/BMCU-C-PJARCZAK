@@ -13,36 +13,33 @@
   Bambu Lab 持续收紧对 BMCU 的兼容性限制，BMCU 最终有可能在该生态中完全无法使用。
 </p>
 <p align="center">
-  为此，我计划为基于开源 Klipper 的打印机开发 BMCU 支持。
+  如果你觉得 BMCU 固件或作者的其他开源项目对你有帮助，欢迎支持后续开发：
 </p>
 
 <p align="center">
-  目前正在筹集资金购买测试打印机。
-</p>
-
-<p align="center">
-  500 美元的目标不需要全部筹集到位。如果我能自行凑齐剩余部分，我会用自己的钱补上。
-</p>
-
-<p align="center">
-  <a href="https://ko-fi.com/jarczakpawel/goal?g=0">
-    <img src="./banner-klipper.png" alt="想在 Klipper 上使用 BMCU？点击下方链接支持开发。" width="460">
+  <a href="https://ko-fi.com/jarczakpawel">
+    <img src="https://img.shields.io/badge/Support_on-Ko--fi-FF5E5B?style=for-the-badge&logo=kofi&logoColor=white" alt="在 Ko-fi 上支持">
   </a>
-</p>
-
-<p align="center">
-  <a href="https://ko-fi.com/jarczakpawel/goal?g=0"><strong>在 Ko-fi 上支持</strong></a>
-  ·
-  <a href="https://revolut.me/paweqxdkx"><strong>通过 Revolut 支持</strong></a>
+  &nbsp;
+  <a href="https://revolut.me/paweqxdkx">
+    <img src="https://img.shields.io/badge/Support_via-Revolut-191C1F?style=for-the-badge" alt="通过 Revolut 支持">
+  </a>
 </p>
 
 <p align="center">
   直接通过 Revolut 支付可避免 Ko-fi 手续费，使更多捐款直接用于项目。
 </p>
 
+> [!WARNING]
+> Bambu Lab 正在通过打印机固件更新限制本地 BMCU 的互通能力。
+>
+> 关于认证/授权限制的由来，以及打印机固件更新如何改变 BMCU 兼容性，请见：
+> [BMCU 与固件封锁（bmcu-vs-firmware-locks.md）](./bmcu-vs-firmware-locks.md)
+
 > [!TIP]
-> If you do not want the AMS/HMS compatibility error to block a project in the slicer, use **[OrcaStudio](https://github.com/jarczakpawel/OrcaStudio)**.
-> On affected A1 / A1 mini firmware, OrcaStudio ignores the device compatibility error, keeps the project usable and retries sending the interrupted print.
+> 如果你不希望 AMS/HMS 兼容性报错在切片软件里阻断项目，请使用 **[OrcaStudio](https://github.com/jarczakpawel/OrcaStudio)**。
+> 在受影响的 A1 / A1 mini 固件上，OrcaStudio 会忽略设备兼容性报错、不阻断项目，
+> 并重试发送被中断的打印任务，从而解决兼容性问题。
 
 # ❗ 重要 - 首次启动（V10.3+） ❗
 
@@ -81,19 +78,35 @@ https://github.com/jarczakpawel/BambuStudio-BMCU
 
 ---
 
-## 支持的打印机
+## 打印机固件兼容性
 
-已在一代和二代打印机上确认正常工作。
+下表列出各机型在不同打印机固件版本下的 BMCU 兼容性。
 
-### 一代打印机
-已确认支持一代打印机。
+| 打印机 | 打印机固件 | BMCU 兼容性 |
+|---|---|---|
+| **A1 / A1 mini** | `01.05.00.00 – 01.07.02.00` | ✅ **正常工作。** 可能出现 HMS 警告，但不以任何方式影响打印机运行。打印机必须配置为 **AMS**，而非 AMS Lite。 |
+| | `>= 01.08.00.00` | ✅ **可用。** 打印机会发出设备兼容性错误，在切片软件中阻断项目。请使用 **[OrcaStudio](https://github.com/jarczakpawel/OrcaStudio)** —— 它会忽略该错误、不阻断项目，并重试发送被中断的打印任务。打印机必须配置为 **AMS**，而非 AMS Lite。 |
+| **P1P / P1S** | `<= 01.08.01.00` | ✅ **正常工作。** 这是新授权机制之前的最后一个固件版本。 |
+| | `>= 01.08.02.00` | ⚠️ **第一次打印可用，且可不限时长运行。** 下一次打印时，BMCU 会因未通过设备认证/授权而被拒绝。再次打印前，请重新连接或复位 BMCU，或重启打印机。 |
+| **X1 / X1C** | `<= 01.08.02.00` | ✅ **正常工作。** 这是新授权机制之前的最后一个固件版本。 |
+| | `>= 01.08.03.00` | ⚠️ **第一次打印可用，且可不限时长运行。** 下一次打印时，BMCU 会因未通过设备认证/授权而被拒绝。再次打印前，请重新连接或复位 BMCU，或重启打印机。 |
+| **P2S** | `<= 01.01.03.00` | ⚠️ **第一次打印可用，且可不限时长运行。** 最好在打印机开机或 BMCU 重新连接后尽快开始打印。再次打印前，请重新连接或复位 BMCU，或重启打印机。 |
+| | `>= 01.02.00.00` | ❌ **无法使用 BMCU 打印。** BMCU 能被识别，手动装料/卸料也正常，但开始打印时打印机会停在 **Preparing AMS**，因为不满足所需的认证/授权。 |
+| **H2D** | `<= 01.02.00.00` | ⚠️ **第一次打印可用，且可不限时长运行。** 最好在打印机开机或 BMCU 重新连接后尽快开始打印。再次打印前，请重新连接或复位 BMCU，或重启打印机。 |
+| | `>= 01.03.00.00` | ❌ **无法使用 BMCU 打印。** BMCU 能被识别，手动装料/卸料也正常，但开始打印时打印机会停在 **Preparing AMS**，因为不满足所需的认证/授权。 |
+| **X2D** | `01.00.01.00` | ⚠️ **第一次打印可用，且可不限时长运行。** 再次打印前需要重启或重新连接。**如果你想继续使用 BMCU，请不要升级打印机固件 —— 目前没有常规方法可以降回这个版本。** |
+| | `>= 01.01.00.00` | ❌ **无法使用 BMCU 打印。** BMCU 能被识别，手动装料/卸料也正常，但打印会停在 **Preparing AMS**。 |
+| **H2S** | 较新固件 | ❌ **停在 Preparing AMS。** BMCU 能被识别，但打印无法开始。最后一个兼容的打印机固件版本尚未确认。 |
+| **A2L** | 所有版本 | ❌ **不可用。** |
 
-### 二代打印机
-已在以下打印机上确认正常工作：
-- Bambu Lab P2S
-- Bambu Lab H2D
+> [!NOTE]
+> **P2S / H2D：** 如果你不想在两次打印之间给整台打印机断电重启，可以做一个简单的开关，
+> 用来**同时断开 SigA 与 SigB**。把两条信号线一起断开再接通，就能让 BMCU 重新连接到总线，
+> 而不必给打印机断电。
 
-目前来看，应该能兼容两代的所有打印机。
+> [!NOTE]
+> 打印机固件更新会实质性改变兼容性，因此上表取代了早期文档中笼统的“两代打印机均可用”说法。
+> 表内结论随上游维护，若与你的实测不符，请以实测为准。
 
 ---
 
@@ -102,7 +115,29 @@ https://github.com/jarczakpawel/BambuStudio-BMCU
 请从 **"Releases"** 部分（GitHub 页面右侧）下载即用固件。
 所有固件变体都在那里生成，并附带 **.txt 说明文档**，指导你选择哪个版本。
 
-首先选择正确的打印机模式文件夹（standard(A1) 或 high_force_load(P1S)），然后按常规选择 AUTOLOAD / RGB / 槽位。
+本仓库的发布包 `firmwares_v11.0.zip` 解压后按 **5 步**依次选择：
+
+1. **有 OLED 屏吗？** 有 → 顶层；没有 → 进 `noled/`
+2. **打印机型号 / 送料力度？** → `standard(A1)` / `high_force_load(P1S)` / `soft_load(A1)`
+3. **板子是 DM 双微动（带自动加载）吗？** 是 → `AUTOLOAD`；否 → `NO_AUTOLOAD`
+4. **在线灯要不要显示耗材颜色？** → `FILAMENT_RGB_ON` / `FILAMENT_RGB_OFF`
+5. **AMS 地址**：新装机用 `AMS_AUTO`；老配置按原来的 `AMS_A` / `AMS_B` / `AMS_C` / `AMS_D`；单通道用 `SOLO`
+
+每一层目录下都有一份 `README.md`，说明当前这一步该选什么。
+
+发布包内共 **144 个固件**（3 模式 × 2 屏幕 × 2 加载方式 × 2 耗材色 × 6 槽位 = 144），
+并附带 `manifest.txt`（含每个固件的 SHA256 / CRC32 / 字节数），可用于核对下载完整性。
+
+文件名与回抽长度：
+
+| 位置 | 文件名 | 回抽长度 |
+|---|---|---|
+| `NO_AUTOLOAD/…/AMS_<槽>/` | `ams_<槽>_0.20f.bin` | 固定 0.20 米 |
+| `NO_AUTOLOAD/…/SOLO/` | `solo_0.095f.bin` | 固定 0.095 米 |
+| `AUTOLOAD/…/AMS_<槽>/` | `ams_<槽>_2.00f_auto.bin` | 由自动加载状态机接管 |
+| `AUTOLOAD/…/SOLO/` | `solo_2.00f_auto.bin` | 由自动加载状态机接管 |
+
+固件向打印机上报的版本号为 `11.00.00.00`。
 
 ## 刷机
 
@@ -192,15 +227,9 @@ https://github.com/jarczakpawel/BMCU-Flasher
 4. 当该通道 LED 开始**闪烁红色**时，把缓冲机构**完全拉到头**，保持约 **1 秒**，然后松开。
 5. 对每个通道重复同样的操作。
 
-After calibration, BMCU knows the exact **minimum, center and maximum buffer positions** for each individual channel.
+校准完成后，BMCU 就会知道**每个通道缓冲机构的最小、中心与最大位置**。
 
-## 重新校准
-
-你可以随时重新校准 BMCU。
-
-步骤：
-1. 从所有通道取出所有耗材
-2. 按住任意一个缓冲位约 5 秒
+如果需要，你可以随时按上述步骤重新校准（先取出全部耗材，再按住任意一个缓冲机构约 5 秒进入校准模式）。
 
 ---
 
@@ -250,6 +279,51 @@ After calibration, BMCU knows the exact **minimum, center and maximum buffer pos
 ---
 
 # 更新日志
+
+## V11.0
+
+### 用户可见变更
+- **合并上游 V11 全部功能**：代码、协议、参数与上游 `jarczakpawel/BMCU-C-PJARCZAK` 最新主线完全同步（`git log main..upstream/main` 为空）。
+- **新增 AMS_AUTO（推荐）槽位固件**：与 Bambu 原厂 AMS 寻址方式一致，多台 BMCU 接入后会被**自动枚举并分配各自的 AMS 编号**；原有的手工指定槽位 AMS_A / AMS_B / AMS_C / AMS_D 仍保留，但已标记为旧版（legacy）。
+- **修复 AMS_AUTO 固件 OLED 恒显示 EMPTY**：AMS_AUTO 寻址下 `ams[4]` 越界落到一片恒为 0 的内存，导致耗材装满后 OLED 仍显示 EMPTY，且上报给打印机的状态同样错误。本版修复后耗材信息可正确显示与上报。
+- **修复「耗材色指示灯不亮」**：FILAMENT_RGB_ON 固件自 V10.5.6 起因两层亮度叠加（上游 12.5% × 本 fork 10%）净亮度只剩 1.28%，纯红 255 最终只剩 4/255，肉眼等同熄灭。本版移除多余的一层，耗材色亮度回到 **10%**，与槽位状态灯一致，且不再把色谱压缩到 5 档。
+- **固件数量大幅精简**：由 2424 个收敛为 **144 个**（3 模式 × 2 OLED × 2 DM × 2 RGB × 6 槽位）。NO_AUTOLOAD 分支原先独占 39 档回抽长度（0.10~2.00 m），占整个矩阵约 97%，实际几乎无人挑选，现统一为默认 **0.20 m**；AUTOLOAD 与 SOLO 不受影响，仍提供 0.095 / 0.20 / 2.00 等档位。
+- **升级后必须重新校准**：全量定点化后校准数据的存储格式已变更，旧固件的校准会被判为无效并强制重校。请按上方「校准 / 重新校准」章节重新校准全部通道。
+- **Flash 占用显著下降**：全量定点化消除了软件浮点，最大固件由 61088 B 降至 **58728 / 61440 B**（余量 2712 B），OLED 变体重新装得下（改动前超容量约 4.8 KB）。
+- **上报版本号**：`11.00.00.00`（沿用上游 V11 的版本号）。
+
+### 技术变更
+- **全量定点化**：`ADC_DMA`、`th_sensor`、`MC_PULL_calibration`、`Flash_saves`、`Motion_control`、`main`、`ssd1306_oled`、`tpu_params` 的关键浮点路径改为定点 / Q 格式，新增工具头文件 `src/fx_units.h`；软浮点助手 `__addsf3` / `__mulsf3` / `__divsf3` 等归零（0 个符号、0 B、0 调用点）。累计 Flash −7560 B、RAM −464 B。
+- 校准载荷改为微伏整数，并用 `rsv bit12（CAL_RSV_FIXED_POINT）` 打标，使旧固件的校准数据自动失效（有意行为）。
+- AMS_AUTO 越界修复：5 处索引点（`ssd1306_oled.cpp` ×2、`bmcu_link.cpp` ×2、`Motion_control.cpp` ×1）全部改用 `bambubus_local_ams_index()`；`ams_addressing.h` 增加防复发注释，说明不可直接用 `BAMBU_BUS_AMS_NUM` 作下标。
+- 耗材色灯修复位于 `src/ws2812.cpp` 的 `set_RGB_online()`：删除耗材色管线里那层 `×32/255`，亮度只由 `set_RGB()` 的统一出口（`brightness = 26`）负责。反汇编 A/B 取证：同一 `kGamma8` 引用锚点处 `slli …, 0x5` 由 **3 条降为 0 条**，`kGamma8` 指纹仍在。
+- `build_fast.py` 支持 AMS_AUTO（`ams_num = 4`），并新增 `BUILD_AMS / BUILD_DM / BUILD_RGB / BUILD_OLED / BUILD_MODE` 环境变量筛选，便于只编译指定组合做验证；新增 `RETRACTS_FULL` 开关可一键还原全量 39 档回抽长度。
+- 文档：`which_to_choose_mode.txt` 增加本 fork 选型总览与校准格式变更提醒；`which_to_choose_filament_rgb.txt` 说明通道灯亮度统一 10% 与颜色显示的门控条件；`which_to_choose_slots.txt` 说明本 fork 仅提供 0.20 m 默认档。
+- 验证：144/144 编译成功；`verify_matrix.py` 全部通过（占位值残留 0、锚点不匹配 0、锚点未对齐 0、超 61440 B 0）。
+- 发布产物由 120.1 MiB 缩小为 7.3 MiB。
+
+### 贡献者
+- **[jarczakpawel](https://github.com/jarczakpawel)** — BMCU 原始固件作者
+- **[kaizou](https://github.com/dj-oyu/BMCU-C-PJARCZAK-kaizou)** — 在线检测策略引擎、AMS 服务观测模块、BMCU Link 协议
+- **[DZRAB](https://github.com/DZRAB)** — OLED 驱动集成、热插拔支持、多传感器兼容、中文文档
+
+## V10.5.7
+
+### 用户可见变更
+- **新增无屏（noled）固件**：`BMCU_OLED` 由头文件默认定义改为编译宏控制，可额外产出一套不含 OLED 驱动的固件，每个变体节省约 2.3 KB Flash；有屏 / 无屏两套固件按需选用，打印行为完全一致。
+- **代码重构与死代码清理**：删除确认无用的死代码，合并重复的实现逻辑，对外行为完全不变。
+- **上报版本号**：保持 `10.05.06.00`（本版未变更版本号）。
+
+### 技术变更
+- 删除死代码：`ahubus_init`、`ahubus_sync_req_list_struct`、`ahubus_map_port_adr_to_index`、3 个 `bus_uart1` 空桩函数、`release_recv_frame`。
+- 中风险重构：`dm_auto` 复位逻辑抽出 helper、`set_motion` 改用命名常量、长帧回复合并为 `bambubus_long_reply`。
+- `BMCU_OLED` 改为编译宏控制；`build_fast.py` 自动编译 oled + noled 两套，固件变体数由 972 增至 **1944**。
+- 972 个变体按重构后代码全量重编，单变体 Flash 占用减少约 172 B。
+
+### 贡献者
+- **[jarczakpawel](https://github.com/jarczakpawel)** — BMCU 原始固件作者
+- **[kaizou](https://github.com/dj-oyu/BMCU-C-PJARCZAK-kaizou)** — 在线检测策略引擎、AMS 服务观测模块、BMCU Link 协议
+- **[DZRAB](https://github.com/DZRAB)** — OLED 驱动集成、热插拔支持、多传感器兼容、中文文档
 
 ## V10.5.6
 

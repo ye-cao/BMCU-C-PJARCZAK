@@ -14,20 +14,21 @@ AMS_AUTO（上游 V11 新增）：由固件在总线上自动协商本机的 AMS
 
 --------------------------------------------------------------------------
 
-AMS_AUTO - recommended
-- Recommended for new installations.
-- Works like the original Bambu AMS addressing system.
-- BMCU units are enumerated automatically and receive their AMS number automatically.
-- Use this option unless AMS_AUTO does not work correctly with your setup.
+AMS_AUTO —— 推荐
+- 新装机推荐使用。
+- 工作方式与 Bambu 原厂 AMS 寻址系统一致。
+- 接入的 BMCU 由固件在总线上自动枚举，并自动分配各自的 AMS 编号。
+- 除非 AMS_AUTO 在你的环境下工作不正常，否则请使用这个选项。
 
 SOLO 固件
-示例文件：solo_0.095f.bin
+示例文件：NO_AUTOLOAD 下为 solo_0.095f.bin；AUTOLOAD 下为 solo_2.00f_auto.bin
 
 此固件用于单 BMCU 独立工作。
 推荐用于单 BMCU 配置。
 
 耗材回退长度：
-- 0.095 米 = 9.5 厘米
+- NO_AUTOLOAD：0.095 米 = 9.5 厘米（固定值）
+- AUTOLOAD：由自动加载状态机接管，不按固定档位回退
 
 
 AMS_A / AMS_B / AMS_C / AMS_D 固件
@@ -75,8 +76,6 @@ ams_*_0.20f.bin（0.20 米 = 20 厘米）。上面的 0.10 / 0.50 例子是上�
 P1 打印机用户注意：
 - 许多 P1 配置使用较长的 PTFE 路径，因此通常需要更长的回退距离。
 - 即使只有一个 BMCU，AMS_A 通常也比 SOLO 更合适（选择你需要的长度）。
-
-Measure the required retraction from the end of the AMS splitter and add a small safety margin so the filament fully clears the splitter.
 
 --------------------------------------------------------------------------
 
