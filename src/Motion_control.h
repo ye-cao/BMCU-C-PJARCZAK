@@ -79,14 +79,14 @@ bool Motion_control_filament_present(uint8_t ch);
 
 /* ==================== 外部变量声明 ==================== */
 
-/** @brief 各通道速度传感器的电压偏移补偿量（单位：V） */
-extern float   MC_PULL_V_OFFSET[4];
+/** @brief 各通道速度传感器的电压偏移补偿量（单位：微伏 µV） */
+extern int32_t MC_PULL_V_OFFSET[4];
 
-/** @brief 各通道速度传感器的最小电压值（对应传感器行程起点） */
-extern float   MC_PULL_V_MIN[4];
+/** @brief 各通道速度传感器的最小电压值（对应传感器行程起点，单位：微伏 µV） */
+extern int32_t MC_PULL_V_MIN[4];
 
-/** @brief 各通道速度传感器的最大电压值（对应传感器行程终点） */
-extern float   MC_PULL_V_MAX[4];
+/** @brief 各通道速度传感器的最大电压值（对应传感器行程终点，单位：微伏 µV） */
+extern int32_t MC_PULL_V_MAX[4];
 
 /** @brief 各通道速度传感器的百分比读数（0~100，整数四舍五入） */
 extern uint8_t MC_PULL_pct[4];
@@ -94,8 +94,8 @@ extern uint8_t MC_PULL_pct[4];
 /** @brief 各通道传感器极性（+1 = 正常，-1 = 反向，用于兼容不同接线方向） */
 extern int8_t  MC_PULL_POLARITY[4];
 
-/** @brief 双微动开关模式下各通道的"无料"电压阈值（单位：V） */
-extern float   MC_DM_KEY_NONE_THRESH[4];
+/** @brief 双微动开关模式下各通道的"无料"电压阈值（单位：微伏 µV） */
+extern int32_t MC_DM_KEY_NONE_THRESH[4];
 
 /** @brief 各通道是否物理插入（true = 已插入） */
 extern bool    filament_channel_inserted[4];
@@ -141,5 +141,32 @@ extern bool    filament_channel_inserted[4];
 /** @brief 耗材回退距离（单位：米，内部使用） */
 #ifndef motion_control_pull_back_distance
 #define motion_control_pull_back_distance AMS_RETRACT_LEN
+#endif
+
+/**
+ * @brief 耗材回退距离（单位：微米 µm，内部使用）
+ *
+ * 有两条取值路径：
+ *
+ * - **批量构建（build_fast.py）**：定义 `BMCU_RETRACT_UM_ANCHOR`。
+ *   回抽长度不在编译期决定，而是由构建脚本对最终 .bin 做 **4 字节二进制替换**
+ *   注入（1 个基础镜像 → 39 个回抽长度固件，避免 39 倍链接耗时）。
+ *   值从 `moc_pull_back_um_anchor` 读取（定义见 Motion_control.cpp）。
+ * - **pio 直接构建**：不定义该宏，由 AMS_RETRACT_LEN（米）编译期折算。
+ *   `0.10f * 1000000.0f` 是常量折叠，运行期不产生任何浮点指令。
+ *
+ * ⚠ 为什么批量构建不能也用常量折叠：
+ *   `-Os -flto` 会把 `(int32_t)(AMS_RETRACT_LEN * 1000000.0f)` 整个折叠掉，
+ *   再把结果直接编成 `lui` + `addi` 两条指令的立即数 ——
+ *   4 字节小端值**根本不会出现在镜像里**，构建脚本就找不到可替换的锚点。
+ *   因此锚点必须是一个真正占 4 字节、且编译器无法折叠的存储对象。
+ */
+#ifdef BMCU_RETRACT_UM_ANCHOR
+extern volatile const int32_t moc_pull_back_um_anchor;
+#define motion_control_pull_back_um ((int32_t)moc_pull_back_um_anchor)
+#else
+#ifndef motion_control_pull_back_um
+#define motion_control_pull_back_um ((int32_t)(AMS_RETRACT_LEN * 1000000.0f))
+#endif
 #endif
 

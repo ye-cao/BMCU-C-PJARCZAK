@@ -426,7 +426,7 @@ void set_cached_u16(uint16_t& cached, uint16_t value, StateField field,
 
 void apply_status_changes(uint32_t reasons, bool emit_events)
 {
-    const _ams& state = ams[BAMBU_BUS_AMS_NUM];
+    const _ams& state = ams[bambubus_local_ams_index()];
     const bool emit = emit_events && g_status_cache_valid;
     const bool all = reasons == BMCU_STATUS_CHANGE_ALL;
 
@@ -501,7 +501,7 @@ FullStatusRecord& append_full_record(uint8_t type)
 void capture_full_status(uint8_t section_mask, uint8_t channel_mask, uint16_t sequence)
 {
     apply_status_changes(BMCU_STATUS_CHANGE_ALL, false);
-    const _ams& state = ams[BAMBU_BUS_AMS_NUM];
+    const _ams& state = ams[bambubus_local_ams_index()];
     g_full_record_count = 0u;
     g_full_record_next = 0u;
     g_full_sequence = sequence;

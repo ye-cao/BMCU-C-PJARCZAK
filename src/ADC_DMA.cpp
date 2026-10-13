@@ -49,24 +49,38 @@ static uint8_t  g_ring_idx = 0;
 /** @brief 已填充的块数 (0 ~ kNBlocks), 用于判断数据是否稳定 */
 static uint8_t  g_blocks_filled = 0;
 
-/** @brief 双缓冲浮点结果: [0] 和 [1] 交替作为读/写缓冲区 */
-static float            g_v[2][kCh] __attribute__((aligned(4)));
-/** @brief 浮点结果读缓冲区索引 (0 或 1) */
+/** @brief 双缓冲结果（定点）: [0] 和 [1] 交替作为读/写缓冲区
+ *  【定点化】单位由 float 伏特 改为 int32 微伏(µV), 量程 0 ~ 3,300,000 */
+static int32_t          g_v[2][kCh] __attribute__((aligned(4)));
+/** @brief 结果读缓冲区索引 (0 或 1) */
 static volatile uint8_t g_v_rd = 0;
-/** @brief 累加器脏标志: 1 表示有新数据需要转换为浮点 */
+/** @brief 累加器脏标志: 1 表示有新数据需要转换 */
 static volatile uint8_t g_acc_dirty = 0;
 /** @brief 数据发布代数（V11 新增：每次发布新电压值 +1，供校准事件驱动采样检测新数据） */
 static uint32_t g_publication = 0u;
 
-/** @brief 缩放系数: 将 ADC 累加和转换为伏特值
- *  公式: voltage = acc_sum × scale
- *  scale = 3.3V / (8190 × 采样数), 8190 是 13 位 ADC 有效范围 */
-static constexpr float kScale32  = 3.3f / (8190.0f *  32.0f);  ///< 1块32样本的缩放
-static constexpr float kScale64  = 3.3f / (8190.0f *  64.0f);  ///< 2块64样本的缩放
-static constexpr float kScale96  = 3.3f / (8190.0f *  96.0f);  ///< 3块96样本的缩放
-static constexpr float kScale128 = 3.3f / (8190.0f * 128.0f);  ///< 4块128样本的缩放
-/** @brief 当前使用的缩放系数 (随块数递增逐步调整) */
-static float g_scale = kScale32;
+/* ================= 定点缩放（替代原 float kScale32/64/96/128）=================
+ * 原式(浮点): voltage[V] = acc_sum × 3.3 / (8190 × N)
+ * 现式(定点): voltage[µV] = (acc_sum × K) >> 9
+ *     K = round(3300000 × 2^9 / (8190 × N))
+ * 选 S=9 的依据: 最大乘积 = 3300000 × 2^S 与 N 无关, S=9 时
+ *     8190×N × K ≈ 1.69e9 < 2^31, 恰好无需 64 位中间结果
+ *     （用 int64 会引入 __muldi3/__divdi3, 比软浮点还贵）。
+ * 精度: 比例误差 < 1.5e-4, 即 < 0.5 mV @3.3V, 小于 ADC 自身 1 LSB(≈0.40 mV)。
+ * ========================================================================== */
+static constexpr uint32_t kFracShift = 9u;                                        ///< 定点右移位数
+static constexpr uint32_t kK32       = 6447u;                                     ///< N=32  定点乘数
+static constexpr uint32_t kK64       = 3223u;                                     ///< N=64  定点乘数
+static constexpr uint32_t kK96       = 2149u;                                     ///< N=96  定点乘数
+static constexpr uint32_t kK128      = 1612u;                                     ///< N=128 定点乘数
+static constexpr uint32_t kAccLim32  = 8190u *  32u;                              ///< N=32  时 acc_sum 上限
+static constexpr uint32_t kAccLim64  = 8190u *  64u;                              ///< N=64  时 acc_sum 上限
+static constexpr uint32_t kAccLim96  = 8190u *  96u;                              ///< N=96  时 acc_sum 上限
+static constexpr uint32_t kAccLim128 = 8190u * 128u;                              ///< N=128 时 acc_sum 上限
+/** @brief 当前使用的定点乘数 (随块数递增逐步调整) */
+static uint32_t g_k_mul   = kK32;
+/** @brief 与 g_k_mul 配对的 acc_sum 上限, 用于乘法前饱和保护 */
+static uint32_t g_acc_lim = kAccLim32;
 
 /**
  * @brief RISC-V 内存屏障: 确保 DMA 内存访问顺序
@@ -116,7 +130,8 @@ static inline void filter_reset()
 {
     g_ring_idx = 0;
     g_blocks_filled = 0;
-    g_scale = kScale32;
+    g_k_mul = kK32;
+    g_acc_lim = kAccLim32;
 
     for (uint32_t ch = 0; ch < kCh; ch++) g_acc_sum[ch] = 0;
 
@@ -126,8 +141,8 @@ static inline void filter_reset()
 
     for (uint32_t ch = 0; ch < kCh; ch++)
     {
-        g_v[0][ch] = 0.0f;
-        g_v[1][ch] = 0.0f;
+        g_v[0][ch] = 0;
+        g_v[1][ch] = 0;
     }
 
     g_v_rd = 0;
@@ -198,14 +213,14 @@ static inline void process_half_update_filter(const uint32_t* p_half)
     if (ni >= kNBlocks) ni = 0u;
     g_ring_idx = ni;
 
-    // 随填充块数增加, 逐步调整缩放系数
+    // 随填充块数增加, 逐步调整定点乘数 (乘数与上限必须成对切换)
     if (g_blocks_filled < kNBlocks)
     {
         g_blocks_filled++;
-        if      (g_blocks_filled == 1u) g_scale = kScale32;   // 1块: 32样本平均
-        else if (g_blocks_filled == 2u) g_scale = kScale64;   // 2块: 64样本平均
-        else if (g_blocks_filled == 3u) g_scale = kScale96;   // 3块: 96样本平均
-        else                            g_scale = kScale128;  // 4块: 128样本平均 (完全稳定)
+        if      (g_blocks_filled == 1u) { g_k_mul = kK32;  g_acc_lim = kAccLim32;  }
+        else if (g_blocks_filled == 2u) { g_k_mul = kK64;  g_acc_lim = kAccLim64;  }
+        else if (g_blocks_filled == 3u) { g_k_mul = kK96;  g_acc_lim = kAccLim96;  }
+        else                            { g_k_mul = kK128; g_acc_lim = kAccLim128; }
     }
 
     adc_dma_compiler_barrier(); // 防止编译器重排脏标志写入
@@ -265,30 +280,30 @@ void ADC_DMA_poll()
  * @brief 获取最新滤波后的 8 通道电压值
  *
  * 先调用 poll() 处理新数据, 若累加器有更新,
- * 则将 8 通道的累加和乘以缩放系数转换为伏特值,
+ * 则将 8 通道的累加和做定点换算得到微伏值,
  * 写入备用缓冲区, 然后切换读索引 (双缓冲)。
  *
- * @return 指向 8 个 float 的静态数组 (单位: V)
+ * @return 指向 8 个 int32 的静态数组 (单位: 微伏 µV)
  */
-const float *ADC_DMA_get_value()
+const int32_t *ADC_DMA_get_value()
 {
     ADC_DMA_poll();
 
     if (g_acc_dirty)
     {
-        const float scale = g_scale;
+        const uint32_t k   = g_k_mul;
+        const uint32_t lim = g_acc_lim;
         const uint8_t wr = (uint8_t)(g_v_rd ^ 1u); // 写入另一个缓冲区
-        float* out = g_v[wr];
+        int32_t* out = g_v[wr];
 
-        // 8 通道并行转换: 累加和 × 缩放系数 = 电压值
-        out[0] = (float)g_acc_sum[0] * scale;
-        out[1] = (float)g_acc_sum[1] * scale;
-        out[2] = (float)g_acc_sum[2] * scale;
-        out[3] = (float)g_acc_sum[3] * scale;
-        out[4] = (float)g_acc_sum[4] * scale;
-        out[5] = (float)g_acc_sum[5] * scale;
-        out[6] = (float)g_acc_sum[6] * scale;
-        out[7] = (float)g_acc_sum[7] * scale;
+        // 8 通道转换: µV = (acc_sum × k + 2^(S-1)) >> S
+        // 乘法前按配对上限饱和, 保证乘积恒 < 2^31 不发生溢出回绕
+        for (uint32_t ch = 0; ch < kCh; ch++)
+        {
+            uint32_t acc = g_acc_sum[ch];
+            if (acc > lim) acc = lim;
+            out[ch] = (int32_t)((acc * k + (1u << (kFracShift - 1u))) >> kFracShift);
+        }
 
         adc_dma_compiler_barrier();
         g_v_rd = wr;         // 原子切换读缓冲区

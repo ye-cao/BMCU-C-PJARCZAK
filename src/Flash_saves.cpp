@@ -849,10 +849,14 @@ bool Flash_AMS_state_write(uint8_t loaded_ch)
  */
 struct alignas(4) Flash_CAL_payload
 {
-    float offs[4];
-    float vmin[4];
-    float vmax[4];
-    float dm_none[4];
+    /* 【定点化】原为 float[4]×4（48 字节）。改为 int32 后载荷长度不变（仍 48 字节），
+     * 但**语义改变**：offs/vmin/vmax/dm_none 现为微伏整数。
+     * 旧设备里以 float 编码的历史数据会被本文件末尾的版本标志位判为不可用，
+     * 从而自动进入"重新校准"流程（见 Flash_MC_PULL_cal_read）。 */
+    int32_t offs[4];
+    int32_t vmin[4];
+    int32_t vmax[4];
+    int32_t dm_none[4];
 };
 
 static bool cal_latest(Flash_CAL_payload* out, uint32_t* rsv, uint32_t* addr)
@@ -884,7 +888,14 @@ static bool cal_commit(const Flash_CAL_payload& p, uint32_t flags)
         MAGIC_CAL, 2u, ((uint32_t)seq << 16) | flags, &p, sizeof(p));
 }
 
-bool Flash_MC_PULL_cal_write_all(const float offs[4], const float vmin[4], const float vmax[4], const int8_t pol[4], const float dm_none[4], uint8_t valid_mask)
+/**
+ * @brief rsv 保留位 bit12：校准载荷格式标志
+ * @note 0=旧版 float 编码（V10.5.x 及以前）；1=定点化后的 int32 微伏编码。
+ *       旧数据必须被识别并作废，否则会被当作巨大整数解出荒谬的电压值。
+ */
+#define CAL_RSV_FIXED_POINT   (1u << 12)
+
+bool Flash_MC_PULL_cal_write_all(const int32_t offs[4], const int32_t vmin[4], const int32_t vmax[4], const int8_t pol[4], const int32_t dm_none[4], uint8_t valid_mask)
 {
     Flash_CAL_payload p;
     memcpy(p.offs, offs, sizeof(p.offs));
@@ -892,7 +903,7 @@ bool Flash_MC_PULL_cal_write_all(const float offs[4], const float vmin[4], const
     memcpy(p.vmax, vmax, sizeof(p.vmax));
     memcpy(p.dm_none, dm_none, sizeof(p.dm_none));
 
-    uint32_t rsv = (uint32_t)(valid_mask & 0x0Fu) << 8;
+    uint32_t rsv = ((uint32_t)(valid_mask & 0x0Fu) << 8) | CAL_RSV_FIXED_POINT;
     for (uint8_t ch = 0u; ch < 4u; ch++)
     {
         if (pol && pol[ch] < 0) rsv |= (1u << ch); // 负极性置位
@@ -901,11 +912,15 @@ bool Flash_MC_PULL_cal_write_all(const float offs[4], const float vmin[4], const
     return cal_commit(p, rsv);
 }
 
-bool Flash_MC_PULL_cal_read(float offs[4], float vmin[4], float vmax[4], int8_t pol[4], float dm_none[4], uint8_t* valid_mask)
+bool Flash_MC_PULL_cal_read(int32_t offs[4], int32_t vmin[4], int32_t vmax[4], int8_t pol[4], int32_t dm_none[4], uint8_t* valid_mask)
 {
     Flash_CAL_payload p;
     uint32_t rsv = 0u, addr = 0u;
     if (!cal_latest(&p, &rsv, &addr)) return false;
+
+    /* 旧版 float 编码的数据直接判为无效，强制走重新校准流程（见 CAL_RSV_FIXED_POINT） */
+    if (!(rsv & CAL_RSV_FIXED_POINT)) return false;
+
     if (valid_mask) *valid_mask = (uint8_t)((rsv >> 8) & 0x0Fu);
 
     memcpy(offs, p.offs, sizeof(p.offs));

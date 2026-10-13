@@ -78,7 +78,7 @@ public:
     // ===== 内容层（界面画面）=====
 
     // 温湿度画面：行0=标题，行1=T/H，行2=通讯状态，行3=TPU型号摘要
-    static void draw_aht20(bool aht20_present, bool online, float temperature_c, float humidity_percent, bool comm_ok);
+    static void draw_aht20(bool aht20_present, bool online, int16_t temperature_dc, uint16_t humidity_dc, bool comm_ok);
 
     // 通用提示画面（4 行文本）
     static void draw_message(const char* line0, const char* line1,
@@ -109,7 +109,7 @@ public:
 
     // 主循环每秒调用：处理页面轮询与动作覆盖的调度与绘制
     static void tick(bool aht20_present, bool aht20_online,
-                     float temperature_c, float humidity_percent,
+                     int16_t temperature_dc, uint16_t humidity_dc,
                      bool comm_ok);
 
     // 四通道概览页

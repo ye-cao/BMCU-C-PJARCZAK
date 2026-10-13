@@ -59,6 +59,14 @@ static uint8_t crc8_sensirion(const uint8_t *data, uint32_t len)
     return crc;
 }
 
+/* ===== 通用限幅：湿度定点值限制在 0 ~ 10000 (0.00 ~ 100.00 %RH) ===== */
+static uint16_t clamp_h_cc(int32_t v)
+{
+    if (v < 0)     return 0u;
+    if (v > 10000) return 10000u;
+    return (uint16_t)v;
+}
+
 /* ================================================================== */
 /*                        SHT40/41/43/45 驱动                         */
 /* ================================================================== */
@@ -79,7 +87,7 @@ static uint8_t try_sht4x(void)
     return 1;
 }
 
-static uint8_t read_sht4x(float *t, float *h)
+static uint8_t read_sht4x(int16_t *t_cc, uint16_t *h_cc)
 {
     uint8_t cmd[2] = {0xFD, 0x00};
     if (i2c2_write(ADDR_SHT, cmd, 2))
@@ -94,10 +102,12 @@ static uint8_t read_sht4x(float *t, float *h)
         return 1;
     uint16_t raw_t = ((uint16_t)buf[0] << 8) | buf[1];
     uint16_t raw_h = ((uint16_t)buf[3] << 8) | buf[4];
-    *t = -45.0f + 175.0f * (float)raw_t / 65535.0f;
-    *h = -6.0f + 125.0f * (float)raw_h / 65535.0f;
-    if (*h < 0.0f)   *h = 0.0f;
-    if (*h > 100.0f) *h = 100.0f;
+    /* 【定点化】输出厘单位: 温度 0.01°C / 湿度 0.01%RH
+     *   t_cc = -4500 + 17500 × raw_t / 65535
+     *   h_cc =  -600 + 12500 × raw_h / 65535  (限幅 0~10000)
+     * 最大乘积 17500×65535 ≈ 1.15e9 < 2^31, 无需 64 位中间结果 */
+    *t_cc = (int16_t)(-4500 + (int32_t)((17500u * (uint32_t)raw_t + 32767u) / 65535u));
+    *h_cc = clamp_h_cc(-600 + (int32_t)((12500u * (uint32_t)raw_h + 32767u) / 65535u));
     return 0;
 }
 
@@ -121,7 +131,7 @@ static uint8_t try_sht3x(void)
     return 1;
 }
 
-static uint8_t read_sht3x(float *t, float *h)
+static uint8_t read_sht3x(int16_t *t_cc, uint16_t *h_cc)
 {
     uint8_t cmd[2] = {0x24, 0x00};
     if (i2c2_write(ADDR_SHT, cmd, 2))
@@ -136,10 +146,9 @@ static uint8_t read_sht3x(float *t, float *h)
         return 1;
     uint16_t raw_t = ((uint16_t)buf[0] << 8) | buf[1];
     uint16_t raw_h = ((uint16_t)buf[3] << 8) | buf[4];
-    *t = -45.0f + 175.0f * (float)raw_t / 65535.0f;
-    *h = 100.0f * (float)raw_h / 65535.0f;
-    if (*h < 0.0f)   *h = 0.0f;
-    if (*h > 100.0f) *h = 100.0f;
+    /* 【定点化】厘单位: h_cc = 10000 × raw_h / 65535 (限幅 0~10000) */
+    *t_cc = (int16_t)(-4500 + (int32_t)((17500u * (uint32_t)raw_t + 32767u) / 65535u));
+    *h_cc = clamp_h_cc((int32_t)((10000u * (uint32_t)raw_h + 32767u) / 65535u));
     return 0;
 }
 
@@ -165,7 +174,7 @@ static uint8_t try_aht20(void)
     return 1;
 }
 
-static uint8_t read_aht20(float *t, float *h)
+static uint8_t read_aht20(int16_t *t_cc, uint16_t *h_cc)
 {
     uint8_t cmd[3] = {0xAC, 0x33, 0x00};
     if (i2c2_write(ADDR_AHT20, cmd, 3))
@@ -184,10 +193,11 @@ static uint8_t read_aht20(float *t, float *h)
     uint32_t raw_t = ((uint32_t)(buf[3] & 0x0F) << 16) |
                      ((uint32_t)buf[4] << 8) |
                      ((uint32_t)buf[5]);
-    *h = 100.0f * (float)raw_h / 1048576.0f;
-    *t = 200.0f * (float)raw_t / 1048576.0f - 50.0f;
-    if (*h < 0.0f)   *h = 0.0f;
-    if (*h > 100.0f) *h = 100.0f;
+    /* 【定点化】20 位原始值: 先右移 4 位再乘, 保证 32 位乘积不溢出
+     *   h_cc = (raw_h>>4) × 10000 >> 16                        (限幅 0~10000)
+     *   t_cc = (raw_t>>4) × 20000 >> 16 - 5000 */
+    *h_cc = clamp_h_cc((int32_t)(((raw_h >> 4) * 10000u + 32768u) >> 16));
+    *t_cc = (int16_t)((int32_t)(((raw_t >> 4) * 20000u + 32768u) >> 16) - 5000);
     return 0;
 }
 
@@ -209,7 +219,7 @@ static uint8_t try_si7021(void)
     return 1;
 }
 
-static uint8_t read_si7021(float *t, float *h)
+static uint8_t read_si7021(int16_t *t_cc, uint16_t *h_cc)
 {
     uint8_t cmd = 0xE5;
     if (i2c2_write(ADDR_Si7021, &cmd, 1))
@@ -221,9 +231,8 @@ static uint8_t read_si7021(float *t, float *h)
     if (crc8_sensirion(buf, 2) != buf[2])
         return 1;
     uint16_t raw_h = ((uint16_t)buf[0] << 8) | buf[1];
-    *h = -6.0f + 125.0f * (float)raw_h / 65536.0f;
-    if (*h < 0.0f)   *h = 0.0f;
-    if (*h > 100.0f) *h = 100.0f;
+    /* 【定点化】/65536 即 >>16: h_cc = -600 + 12500 × raw_h >> 16 */
+    *h_cc = clamp_h_cc((int32_t)((12500u * (uint32_t)raw_h + 32768u) >> 16) - 600);
 
     cmd = 0xE0;
     if (i2c2_write(ADDR_Si7021, &cmd, 1))
@@ -234,7 +243,8 @@ static uint8_t read_si7021(float *t, float *h)
     if (crc8_sensirion(buf, 2) != buf[2])
         return 0;
     uint16_t raw_t = ((uint16_t)buf[0] << 8) | buf[1];
-    *t = -46.85f + 175.72f * (float)raw_t / 65536.0f;
+    /* 【定点化】t_cc = -4685 + 17572 × raw_t >> 16 */
+    *t_cc = (int16_t)((int32_t)((17572u * (uint32_t)raw_t + 32768u) >> 16) - 4685);
     return 0;
 }
 
@@ -257,7 +267,7 @@ static uint8_t try_hdc1080(void)
     return 1;
 }
 
-static uint8_t read_hdc1080(float *t, float *h)
+static uint8_t read_hdc1080(int16_t *t_cc, uint16_t *h_cc)
 {
     uint8_t cmd = 0x00;
     if (i2c2_write(ADDR_Si7021, &cmd, 1))
@@ -268,10 +278,9 @@ static uint8_t read_hdc1080(float *t, float *h)
         return 1;
     uint16_t raw_t = ((uint16_t)buf[0] << 8) | buf[1];
     uint16_t raw_h = ((uint16_t)buf[2] << 8) | buf[3];
-    *t = 165.0f * (float)raw_t / 65536.0f - 40.0f;
-    *h = 100.0f * (float)raw_h / 65536.0f;
-    if (*h < 0.0f)   *h = 0.0f;
-    if (*h > 100.0f) *h = 100.0f;
+    /* 【定点化】t_cc = 16500 × raw_t >> 16 - 4000;  h_cc = 10000 × raw_h >> 16 */
+    *t_cc = (int16_t)((int32_t)((16500u * (uint32_t)raw_t + 32768u) >> 16) - 4000);
+    *h_cc = clamp_h_cc((int32_t)((10000u * (uint32_t)raw_h + 32768u) >> 16));
     return 0;
 }
 
@@ -384,7 +393,7 @@ static uint8_t try_bme280(void)
     return 0;
 }
 
-static uint8_t read_bme280(float *t, float *h)
+static uint8_t read_bme280(int16_t *t_cc, uint16_t *h_cc)
 {
     uint8_t buf[8];
     if (bme280_read_reg(0xF7, buf, 8))
@@ -394,12 +403,15 @@ static uint8_t read_bme280(float *t, float *h)
                               ((uint32_t)buf[5] >> 4));
     int32_t adc_H = (int32_t)(((uint32_t)buf[6] << 8) | (uint32_t)buf[7]);
     int32_t t_fine;
-    int32_t temp_x100 = bme280_compensate_T(adc_T, &t_fine);
+    /* 【定点化】该驱动本身已输出定点量:
+     *   bme280_compensate_T() 返回 0.01°C, 直接使用
+     *   bme280_compensate_H() 返回 Q22.10 (÷1024 = %RH), ×25 >>8 转 0.01%RH
+     * 先限幅到 100.00%RH 再乘, 避免 32 位乘积溢出 */
+    int32_t  temp_cc   = bme280_compensate_T(adc_T, &t_fine);
     uint32_t hum_x1024 = bme280_compensate_H(adc_H, t_fine);
-    *t = (float)temp_x100 / 100.0f;
-    *h = (float)hum_x1024 / 1024.0f;
-    if (*h < 0.0f)   *h = 0.0f;
-    if (*h > 100.0f) *h = 100.0f;
+    *t_cc = (int16_t)temp_cc;
+    if (hum_x1024 > 102400u) hum_x1024 = 102400u;
+    *h_cc = (uint16_t)((hum_x1024 * 25u + 128u) >> 8);
     return 0;
 }
 
@@ -421,16 +433,16 @@ void th_sensor_init(void)
     if (try_bme280())  { detected_type = TH_BME280;  return; }
 }
 
-uint8_t th_sensor_read(float *temperature, float *humidity)
+uint8_t th_sensor_read(int16_t *temperature_cc, uint16_t *humidity_cc)
 {
     switch (detected_type)
     {
-        case TH_SHT4x:   return read_sht4x(temperature, humidity);
-        case TH_SHT3x:   return read_sht3x(temperature, humidity);
-        case TH_AHT20:   return read_aht20(temperature, humidity);
-        case TH_SI7021:  return read_si7021(temperature, humidity);
-        case TH_HDC1080: return read_hdc1080(temperature, humidity);
-        case TH_BME280:  return read_bme280(temperature, humidity);
+        case TH_SHT4x:   return read_sht4x(temperature_cc, humidity_cc);
+        case TH_SHT3x:   return read_sht3x(temperature_cc, humidity_cc);
+        case TH_AHT20:   return read_aht20(temperature_cc, humidity_cc);
+        case TH_SI7021:  return read_si7021(temperature_cc, humidity_cc);
+        case TH_HDC1080: return read_hdc1080(temperature_cc, humidity_cc);
+        case TH_BME280:  return read_bme280(temperature_cc, humidity_cc);
         default:         return 1;
     }
 }

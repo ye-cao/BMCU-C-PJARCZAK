@@ -53,11 +53,11 @@ enum class _tpu_model : uint8_t
 //   phase1_ms         : 三段式第 1 段"中力推一推"时长（原 2000ms）
 //   phase2_ms         : 第 2 段"轻压保持"时长（原 3000ms）；总顶满阈值 = phase1_ms + phase2_ms
 //   jam_ms            : 顶满累计超过该值才算真堵（原5000ms）；软料弹性大，放宽
-//   phase1_lim        : 第 1 段 PWM 力度上限（原 600.0）
-//   phase2_lim        : 第 2 段 PWM 力度上限（原 180.0）；软料要更小防啃料
-//   feed_pwm_hi       : on_use 主路 PWM 上限（推一把力度，原 MC_LOAD_S2_PWM_HI 480-550）；软料调小防过推
-//   feed_pwm_lo       : on_use 主路 PWM 下限（持续推力上限，原 MC_LOAD_S2_PWM_LO=1000）；软料调小防啃料
-//   pull_comp_m       : 回抽弹性补偿（米），TPU 回弹，固定长度回抽额外多退一点[待实测]
+//   phase1_lim        : 第 1 段 PWM 力度上限（原 600.0）【定点化：毫 PWM (0.001)】
+//   phase2_lim        : 第 2 段 PWM 力度上限（原 180.0）；软料要更小防啃料【毫 PWM】
+//   feed_pwm_hi       : on_use 主路 PWM 上限（推一把力度，原 MC_LOAD_S2_PWM_HI 480-550）；软料调小防过推【毫 PWM】
+//   feed_pwm_lo       : on_use 主路 PWM 下限（持续推力上限，原 MC_LOAD_S2_PWM_LO=1000）；软料调小防啃料【毫 PWM】
+//   pull_comp_um      : 回抽弹性补偿（微米 µm），TPU 回弹，固定长度回抽额外多退一点[待实测]
 //   push_cycle_ms     : 间歇送料周期（ms）。TPU 软料不能被持续推力顶着，否则料被压缩挤出缓冲头间隙
 //                       周期内分"推窗口(push_on_ms)"和"停窗口(cycle-on)"，停窗口电机停转让料松、被拉走
 //   push_on_ms        : 周期内正向推料窗口时长（ms）。其余时间为停窗口（PWM=0）。
@@ -70,16 +70,17 @@ struct _tpu_param
     uint8_t rgb_r;             // RGB 识别色（FILAMENT_RGB 宏关时用于验证识别）
     uint8_t rgb_g;
     uint8_t rgb_b;
-    float on_use_target_pct;
-    float on_use_band_hi;
+    /* 【定点化】全部改为整数，消除软浮点；单位见右侧注释 */
+    int32_t on_use_target_pct;   /* 厘百分比 (0.01%)，50.0% = 5000 */
+    int32_t on_use_band_hi;      /* 厘百分比 (0.01%) */
     uint16_t phase1_ms;
     uint16_t phase2_ms;
     uint16_t jam_ms;
-    float phase1_lim;
-    float phase2_lim;
-    float feed_pwm_hi;
-    float feed_pwm_lo;
-    float pull_comp_m;
+    int32_t phase1_lim;          /* 毫 PWM (0.001)，520.0 PWM = 520000 */
+    int32_t phase2_lim;          /* 毫 PWM (0.001) */
+    int32_t feed_pwm_hi;         /* 毫 PWM (0.001) */
+    int32_t feed_pwm_lo;         /* 毫 PWM (0.001) */
+    int32_t pull_comp_um;        /* 微米 (µm)，0.01 m = 10000 */
     uint16_t push_cycle_ms;
     uint16_t push_on_ms;
 };
@@ -96,13 +97,13 @@ struct _tpu_param
 // 越软的 target 越低、band_hi 越低、力度越小、时间窗越长、回抽补偿越大
 static const _tpu_param TPU_PARAMS[] =
 {
-    // model              id      name            r    g    b    target band_hi p1ms p2ms jamms p1lim  p2lim feedhi feedlo pullcomp  cyc  on
-    { _tpu_model::TPU_FOR_AMS,  "GFU98", "TPU for AMS",  0x00u,0x20u,0x20u, 50.0f, 58.0f, 2000, 3000, 6000, 520.0f, 160.0f, 440.0f, 950.0f, 0.01f, 800, 500 }, // 68D 硬
-    { _tpu_model::TPU_95A_HF,   "GFU00", "TPU 95A HF",   0x00u,0x20u,0x00u, 45.0f, 54.0f, 2500, 4000, 7000, 420.0f, 120.0f, 400.0f, 900.0f, 0.02f, 900, 450 }, // 95A HF 中
-    { _tpu_model::TPU_GEN_AMS,  "GFU02", "Generic TPU",  0x18u,0x00u,0x20u, 50.0f, 58.0f, 2000, 3000, 6000, 520.0f, 160.0f, 440.0f, 950.0f, 0.01f, 800, 500 }, // 约68D 硬
-    { _tpu_model::TPU_95A,      "GFU95", "TPU 95A",      0x20u,0x18u,0x00u, 45.0f, 54.0f, 2500, 4000, 7000, 420.0f, 120.0f, 400.0f, 900.0f, 0.02f, 900, 420 }, // 95A 中
-    { _tpu_model::TPU_90A,      "GFU90", "TPU 90A",      0x20u,0x0Au,0x00u, 40.0f, 50.0f, 3000, 5000, 8000, 360.0f, 100.0f, 360.0f, 850.0f, 0.03f,1000, 400 }, // 90A 软
-    { _tpu_model::TPU_85A,      "GFU85", "TPU 85A",      0x20u,0x00u,0x00u, 35.0f, 46.0f, 3500, 6000, 9000, 300.0f,  80.0f, 320.0f, 800.0f, 0.04f,1200, 400 }, // 85A 最软
+    // model              id      name            r    g    b    target band_hi p1ms p2ms jamms p1lim   p2lim   feedhi  feedlo  pullcomp  cyc   on
+    { _tpu_model::TPU_FOR_AMS,  "GFU98", "TPU for AMS",  0x00u,0x20u,0x20u,  5000,  5800, 2000, 3000, 6000, 520000, 160000, 440000, 950000,  10000,  800, 500 }, // 68D 硬
+    { _tpu_model::TPU_95A_HF,   "GFU00", "TPU 95A HF",   0x00u,0x20u,0x00u,  4500,  5400, 2500, 4000, 7000, 420000, 120000, 400000, 900000,  20000,  900, 450 }, // 95A HF 中
+    { _tpu_model::TPU_GEN_AMS,  "GFU02", "Generic TPU",  0x18u,0x00u,0x20u,  5000,  5800, 2000, 3000, 6000, 520000, 160000, 440000, 950000,  10000,  800, 500 }, // 约68D 硬
+    { _tpu_model::TPU_95A,      "GFU95", "TPU 95A",      0x20u,0x18u,0x00u,  4500,  5400, 2500, 4000, 7000, 420000, 120000, 400000, 900000,  20000,  900, 420 }, // 95A 中
+    { _tpu_model::TPU_90A,      "GFU90", "TPU 90A",      0x20u,0x0Au,0x00u,  4000,  5000, 3000, 5000, 8000, 360000, 100000, 360000, 850000,  30000, 1000, 400 }, // 90A 软
+    { _tpu_model::TPU_85A,      "GFU85", "TPU 85A",      0x20u,0x00u,0x00u,  3500,  4600, 3500, 6000, 9000, 300000,  80000, 320000, 800000,  40000, 1200, 400 }, // 85A 最软
 };
 static const int TPU_PARAMS_N = (int)(sizeof(TPU_PARAMS) / sizeof(TPU_PARAMS[0]));
 

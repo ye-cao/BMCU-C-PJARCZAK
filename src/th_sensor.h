@@ -36,11 +36,13 @@ void th_sensor_init(void);
 /**
  * @brief 读取温湿度数据
  *
- * @param temperature  输出参数，温度值（单位：°C）
- * @param humidity     输出参数，相对湿度（单位：%RH，已钳位到 0~100）
- * @return             0=读取成功，1=无传感器或读取失败
+ * @param temperature_cc  输出参数，温度值（单位：0.01°C，即厘摄氏度，int16 可覆盖 -327.68~327.67°C）
+ * @param humidity_cc     输出参数，相对湿度（单位：0.01%RH，已钳位到 0~10000）
+ * @return                0=读取成功，1=无传感器或读取失败
+ *
+ * 【定点化】原接口为 float °C / %RH，现改为 int16/uint16 厘单位，以彻底消除软浮点依赖
  */
-uint8_t th_sensor_read(float *temperature, float *humidity);
+uint8_t th_sensor_read(int16_t *temperature_cc, uint16_t *humidity_cc);
 
 /**
  * @brief 获取检测到的传感器名称

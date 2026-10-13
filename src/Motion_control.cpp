@@ -21,38 +21,47 @@
 #include "app_api.h"
 #include "hal/time_hw.h"
 #include "tpu_params.h"
+#include "fx_units.h"
 
-/** @brief 计算浮点数绝对值 */
-static inline float absf(float x) { return (x < 0.0f) ? -x : x; }
-/** @brief 将浮点数限制在 [a, b] 区间内 */
-static inline float clampf(float x, float a, float b)
-{
-    if (x < a) return a;
-    if (x > b) return b;
-    return x;
-}
+/* ==================== 定点化单位约定 ====================
+ * 详细约定与溢出铁律见 fx_units.h。本文件统一使用：
+ *   PWM / 推力    int32_t  毫 PWM (0.001)   满量程 1000 = 1000000，范围 ±1000000
+ *   压力百分比    int32_t  厘百分比 (0.01%) 50 % = 5000，范围 0 ~ 10000
+ *   电压          int32_t  微伏 (µV)        1.65 V = 1650000
+ *   电机速度      int32_t  微米/秒 (µm/s)   60 mm/s = 60000
+ *   位移 / 距离   int32_t  微米 (µm)        0.120 m = 120000
+ *   时间步长      int32_t  微秒 (µs)
+ * 任何定点乘法的中间结果都必须落在 int32 内；一旦引 入 int64 乘法/除法，
+ * 就会把 __muldi3 / __divdi3 / __udivdi3 拉回来（各数百字节），得不偿失。
+ * ====================================================== */
+
+/** @brief 毫 PWM 倍数：1 个 PWM 单位（= 0.1 % 占空比）= 1000 毫 PWM */
+static constexpr int32_t kPwmM = 1000;
+/** @brief 厘百分比倍数：1 % = 100 厘百分比 */
+static constexpr int32_t kPctC = 100;
+/** @brief 千分之一秒：时间步长换算用（time_us / kUsPerMs = 毫秒） */
+static constexpr int32_t kUsPerMs = 1000;
+/** @brief 百万分之一米：微米 → 米 的换算分母 */
+static constexpr int32_t kUmPerM = 1000000;
 
 /**
  * @brief 将电压值转换为 centi-volt 格式（向上取整），用于存储到 uint8_t
  *        centi-volt = voltage * 100，向上取整确保不低估阈值
+ * @param v_uv 电压（微伏）
+ * @note 【定点化】原 float 版为 x = v*100 - 0.0001 后向上取整。
+ *       换成微伏后 x = (v_uv - 1)/10000，向上取整等价于
+ *       iv = (v_uv-1)/10000 且若 iv*10000 < v_uv-1 则 iv++（乘法回代，避免取整方向歧义）
  */
-static inline uint8_t dm_key_v_to_centi_ceil(float v)
+static inline uint8_t dm_key_v_to_centi_ceil(int32_t v_uv)
 {
-    if (v <= 0.0f) return 0u;
+    if (v_uv <= 0) return 0u;
 
-    float x = v * 100.0f - 0.0001f;
-    int iv = (int)x;
-    if ((float)iv < x) iv++;
+    int32_t iv = (v_uv - 1) / 10000;
+    if (iv * 10000 < (v_uv - 1)) iv++;   // 向上取整
 
     if (iv < 0) iv = 0;
     if (iv > 255) iv = 255;
     return (uint8_t)iv;
-}
-
-/** @brief 将 centi-volt 格式值转换回电压值（cv * 0.01V） */
-static inline float dm_key_centi_to_v(uint8_t cv)
-{
-    return 0.01f * (float)cv;
 }
 
 /* ==================== 高精度时间系统 ==================== */
@@ -131,28 +140,34 @@ static inline __attribute__((always_inline)) uint64_t time_ms_fast(void)
 
 /**
  * @brief 根据压力误差计算回退力矩（分段线性映射）
- *        err<=0.10:无回退, 0.10~0.35:450~550, 0.35~2.35:550~850
+ *        err<=10:无回退, 10~35:450000~550000, 35~235:550000~850000
+ * @param err     压力误差，单位厘百分比（0.01%）
+ * @param mag_max 力矩上限，单位毫 PWM（0.001）
+ * @return 回退力矩，单位毫 PWM
+ * @note 【定点化】分段插值参数 t 用 Q10 定点表示（1024 = 1.0），
+ *       避免浮点除法；最大中间积 300000×1024 = 3.07e8 < 2^31 ✓
  */
-static inline float retract_mag_from_err(float err, float mag_max)
+static inline int32_t retract_mag_from_err(int32_t err, int32_t mag_max)
 {
-    constexpr float e0 = 0.10f;
-    constexpr float e1 = 0.35f;
-    constexpr float e2 = 2.35f;
+    /* 分段点（单位：厘百分比）：0.10 % = 10，0.35 % = 35，2.35 % = 235 */
+    constexpr int32_t e0 = 10;
+    constexpr int32_t e1 = 35;
+    constexpr int32_t e2 = 235;
 
-    if (err <= e0) return 0.0f;
+    if (err <= e0) return 0;
 
-    float mag;
+    int32_t mag;
     if (err < e1)
     {
-        float t = (err - e0) / (e1 - e0);
-        t = clampf(t, 0.0f, 1.0f);
-        mag = 450.0f + 100.0f * t;
+        int32_t t = ((err - e0) * 1024) / (e1 - e0);
+        t = fx_clamp(t, 0, 1024);
+        mag = 450 * kPwmM + (100 * kPwmM * t) / 1024;
     }
     else
     {
-        float t = (err - e1) / (e2 - e1);
-        t = clampf(t, 0.0f, 1.0f);
-        mag = 550.0f + 300.0f * t;
+        int32_t t = ((err - e1) * 1024) / (e2 - e1);
+        t = fx_clamp(t, 0, 1024);
+        mag = 550 * kPwmM + (300 * kPwmM * t) / 1024;
     }
 
     if (mag > mag_max) mag = mag_max;
@@ -160,8 +175,9 @@ static inline float retract_mag_from_err(float err, float mag_max)
 }
 
 
-/** @brief 滞回比较器：防止阈值边界频繁切换（start=激活, stop=停止） */
-static inline uint8_t hyst_u8(uint8_t active, float v, float start, float stop)
+/** @brief 滞回比较器：防止阈值边界频繁切换（start=激活, stop=停止）
+ *  【定点化】v/start/stop 统一为 int32 定点量（厘百分比） */
+static inline uint8_t hyst_u8(uint8_t active, int32_t v, int32_t start, int32_t stop)
 {
     if (active) { if (v <= stop)  active = 0; }
     else        { if (v >= start) active = 1; }
@@ -173,14 +189,19 @@ static inline uint8_t hyst_u8(uint8_t active, float v, float start, float stop)
 static constexpr uint8_t  kChCount = 4;
 /** @brief PWM 最大值（1000 = 100% 占空比） */
 static constexpr int      PWM_lim  = 1000;
-/** @brief 圆周率，用于 AS5600 角度转距离计算 */
-static constexpr float kAS5600_PI = 3.14159265358979323846f;
+/** @brief AS5600 每计数对应的耗材位移绝对值，单位：纳米（nm/count）
+ *  推导：滚轮周长 π×7.5mm = 23561.9449 µm/圈，每圈 4096 计数
+ *        ⇒ 23561.9449 / 4096 = 5.752428 µm/count = 5752.428 nm/count
+ *  【定点化】原为 `-(π*7.5f)/4096.0f`（mm/count）的 float 常量。
+ *            改为整数常量后，运行期与常量池里都不再出现浮点。
+ *  约定：AP 计数增加 = 耗材回退（对应原实现里负系数 kAS5600_MM_PER_CNT 的语义）。 */
+static constexpr int32_t kAS5600_NM_PER_CNT = 5752;   /* 5.752428 µm/count 截断到 nm */
 
-/**
- * @brief AS5600 每计数对应的耗材位移（mm/count）
- * 公式：-(π × 滚轮直径7.5mm) / 4096（每圈计数），负号=计数增加=回退
- */
-static constexpr float kAS5600_MM_PER_CNT = -(kAS5600_PI * 7.5f) / 4096.0f;
+/** @brief 速度换算系数：µm/count × 1e6 = 5752428（负号 = 计数增加即回退）
+ *  速度(µm/s) = 计数差 × kAS5600_SPEED_NUM / 时间(µs)
+ *  取值与上游 float 实现逐位对齐：dist_mm × inv_dt
+ *  = diff × (-5.752428e-3) mm × 1e6×tpus/dt_ticks → diff × 5752428 / dt_us。 */
+static constexpr int32_t kAS5600_SPEED_NUM = -5752428;
 
 /* ==================== AS5600 编码器配置 ==================== */
 
@@ -196,11 +217,27 @@ static GPIO_TypeDef* const AS5600_SDA_PORT[4] = { GPIOD, GPIOC, GPIOC, GPIOC };
 static const uint16_t      AS5600_SDA_PIN [4] = { GPIO_Pin_0, GPIO_Pin_15, GPIO_Pin_14, GPIO_Pin_13 };
 
 static int64_t as5600_odometer_count[4] = {0,0,0,0};
-static constexpr float kAS5600_M_PER_CNT = -kAS5600_MM_PER_CNT * 0.001f;
-static constexpr uint32_t distance_counts(float meters)
+
+/** @brief AS5600 每米对应的计数（= 1e6 µm ÷ 5.752428 µm/count = 173839.64 → 四舍五入 173840）
+ *  @note 必须与 fx_units.h 的 FX_AS5600_CNT_PER_M 保持一致；
+ *        取整引入相对误差 2.1e-6（12 m 处约 4 计数 / 25 µm），远低于滚轮直径本身的公差。 */
+static constexpr uint32_t kAS5600_CNT_PER_M = 173840u;
+
+/**
+ * @brief 长度（微米）→ AS5600 计数（向上取整）
+ * @param um 长度，单位微米，**要求 0 <= um <= 12000000（12 m）**
+ * @note 【定点化】原实现为 ceil(meters / kAS5600_M_PER_CNT)。
+ *       现改成整数版本：counts = ceil(um × 173840 / 1e6) = ceil(um × 173840 / 10^6)。
+ *       为避免 um×173840 溢出 int32，把 um 拆成"米 / 毫米 / 微米余数"三段分别
+ *       乘上 173840 后再累加（各自都远小于 2^31），最后统一向上取整。
+ *       12 m 时最大中间量 = 12×173840×1000 ≈ 2.086e9 < 2^31 ✓
+ */
+static constexpr uint32_t distance_counts(int32_t um)
 {
-    return (uint32_t)(meters / kAS5600_M_PER_CNT) +
-        ((float)(uint32_t)(meters / kAS5600_M_PER_CNT) * kAS5600_M_PER_CNT < meters ? 1u : 0u);
+    return (uint32_t)(
+        ((uint32_t)(um / kUmPerM) * kAS5600_CNT_PER_M * 1000u) +
+        ((uint32_t)((um / kUsPerMs) % kUsPerMs) * kAS5600_CNT_PER_M) +
+        (((uint32_t)(um % kUsPerMs) * kAS5600_CNT_PER_M) / 1000u) + 999u) / 1000u;
 }
 
 static inline uint32_t encoder_count(uint8_t ch)
@@ -216,11 +253,23 @@ static inline uint32_t count_distance(uint32_t a, uint32_t b)
 
 float Motion_control_filament_meters(uint8_t ch)
 {
-    return ch < kChCount ? 1.0f - (float)as5600_odometer_count[ch] * kAS5600_M_PER_CNT : 1.0f;
+    if (ch >= kChCount) return 1.0f;
+
+    /* 【定点化】原实现 1.0f - (float)count * kAS5600_M_PER_CNT 会拉进
+     * __floatdisf(__floatundisf)/__mulsf3/__subsf3 共约 1.9 KB。
+     * 这里改为纯整数换算 + IEEE-754 位运算装配（fx_meters_from_counts），
+     * 一个软浮点助手都不引入。返回值仍是 float —— 因为该字段原样 memcpy
+     * 进打印机总线报文，属协议硬约束。
+     * 先把 int64 里程表限幅到 int32 可表示范围，避免转换溢出。 */
+    int64_t c64 = as5600_odometer_count[ch];
+    if (c64 >  2147483647LL) c64 =  2147483647LL;
+    if (c64 < -2147483648LL) c64 = -2147483648LL;
+
+    return fx_meters_from_counts((int32_t)c64);
 }
 
-/** @brief 各通道实时速度（mm/s），正值=送丝，负值=回退 */
-float speed_as5600[4] = {0, 0, 0, 0};
+/** @brief 各通道实时速度（µm/s），正值=送丝，负值=回退【定点化：原 mm/s 的 float】 */
+int32_t speed_as5600[4] = {0, 0, 0, 0};
 /* ===== AS5600 传感器健康监控（防飞车保护）===== */
 /** @brief 传感器健康标志（1=正常, 0=故障），连续失败3次才标记故障 */
 static uint8_t g_as5600_good[4]     = {0,0,0,0};
@@ -236,38 +285,38 @@ static constexpr uint8_t kAS5600_OK_RECOVER  = 2;
 static inline bool AS5600_is_good(uint8_t ch) { return g_as5600_good[ch] != 0; }
 
 /* ---- 回退运动参数 ---- */
-/** @brief 回退快速速度（60 mm/s） */
-static constexpr float PULL_V_FAST   = 60.0f;   // mm/s
-/** @brief 回退末段慢速（12 mm/s），防止冲击 */
-static constexpr float PULL_V_END    = 12.0f;   // mm/s
-/** @brief 减速区长度（15mm），低于此距离开始减速 */
-static constexpr float PULL_RAMP_M   = 0.015f;  // 15mm
-/** @brief 回退最小 PWM（400），确保末端有足够"踢力" */
-static constexpr float PULL_PWM_MIN  = 400.0f;  // "kick"
+/** @brief 回退快速速度（60 mm/s = 60000 µm/s） */
+static constexpr int32_t PULL_V_FAST   = 60 * 1000;      // µm/s
+/** @brief 回退末段慢速（12 mm/s = 12000 µm/s），防止冲击 */
+static constexpr int32_t PULL_V_END    = 12 * 1000;      // µm/s
+/** @brief 减速区长度（15 mm = 15000 µm），低于此距离开始减速 */
+static constexpr int32_t PULL_RAMP_UM  = 15 * 1000;      // µm
+/** @brief 回退最小 PWM（400 → 400000 毫 PWM），确保末端有足够"踢力" */
+static constexpr int32_t PULL_PWM_MIN  = 400 * kPwmM;    // "kick"
 
-/** @brief 各通道回退剩余距离（米），用于减速区计算 */
-static float g_pull_remain_m[4]  = {0,0,0,0};
-/** @brief 各通道回退目标速度（mm/s，负值=反向） */
-static float g_pull_speed_set[4] = {-PULL_V_FAST,-PULL_V_FAST,-PULL_V_FAST,-PULL_V_FAST};
+/** @brief 各通道回退剩余距离（微米），用于减速区计算 */
+static int32_t g_pull_remain_um[4]  = {0,0,0,0};
+/** @brief 各通道回退目标速度（µm/s，负值=反向） */
+static int32_t g_pull_speed_set[4] = {-PULL_V_FAST,-PULL_V_FAST,-PULL_V_FAST,-PULL_V_FAST};
 
-/** @brief 各通道速度传感器电压偏移补偿量（V） */
-float MC_PULL_V_OFFSET[4]      = {0.0f, 0.0f, 0.0f, 0.0f};
-/** @brief 各通道传感器最小电压（行程起点） */
-float MC_PULL_V_MIN[4]         = {1.00f, 1.00f, 1.00f, 1.00f};
-/** @brief 各通道传感器最大电压（行程终点） */
-float MC_PULL_V_MAX[4]         = {2.00f, 2.00f, 2.00f, 2.00f};
+/** @brief 各通道速度传感器电压偏移补偿量（微伏） */
+int32_t MC_PULL_V_OFFSET[4]      = {0, 0, 0, 0};
+/** @brief 各通道传感器最小电压（行程起点，微伏；默认 1.00 V） */
+int32_t MC_PULL_V_MIN[4]         = {1000000, 1000000, 1000000, 1000000};
+/** @brief 各通道传感器最大电压（行程终点，微伏；默认 2.00 V） */
+int32_t MC_PULL_V_MAX[4]         = {2000000, 2000000, 2000000, 2000000};
 /** @brief 各通道传感器极性（+1正常, -1反向） */
 int8_t MC_PULL_POLARITY[4]     = {1, 1, 1, 1};
-/** @brief 双微动开关"无料"电压阈值（V） */
-float MC_DM_KEY_NONE_THRESH[4] = {0.60f, 0.60f, 0.60f, 0.60f};
+/** @brief 双微动开关"无料"电压阈值（微伏；默认 0.60 V） */
+int32_t MC_DM_KEY_NONE_THRESH[4] = {600000, 600000, 600000, 600000};
 
 /** @brief 各通道百分比读数（0~100 整数，四舍五入） */
 uint8_t MC_PULL_pct[4]        = {50, 50, 50, 50};
-/** @brief 各通道百分比读数（浮点精确值，用于PID） */
-static float MC_PULL_pct_f[4] = {50.0f, 50.0f, 50.0f, 50.0f};
+/** @brief 各通道百分比读数（精确值，厘百分比 0~10000，用于PID） */
+static int32_t MC_PULL_pct_cc[4] = {5000, 5000, 5000, 5000};
 
-/** @brief 各通道传感器原始电压（已补偿偏移和极性） */
-static float  MC_PULL_stu_raw[4]        = {1.65f, 1.65f, 1.65f, 1.65f};
+/** @brief 各通道传感器原始电压（已补偿偏移和极性，微伏） */
+static int32_t  MC_PULL_stu_raw[4]        = {1650000, 1650000, 1650000, 1650000};
 /** @brief 各通道传感器状态：-1=低压力, 0=中位, 1=高压力 */
 static int8_t MC_PULL_stu[4]            = {0, 0, 0, 0};
 
@@ -305,13 +354,13 @@ static inline __attribute__((always_inline)) void MC_STU_RGB_set_latch(uint8_t c
  * @brief 将双微动开关电压转换为数字状态
  *        0=无料, 1=双开关(到位), 2=仅外部开关(插入中), 3=其他
  */
-static inline uint8_t dm_key_to_state(uint8_t ch, float v)
+static inline uint8_t dm_key_to_state(uint8_t ch, int32_t v_uv)
 {
-    const float none_thr = MC_DM_KEY_NONE_THRESH[ch];
+    const int32_t none_thr = MC_DM_KEY_NONE_THRESH[ch];
 
-    if (v < none_thr) return 0u;   // none
-    if (v > 1.7f)     return 1u;   // both
-    if (v > 1.4f)     return 2u;   // external only
+    if (v_uv < none_thr)  return 0u;   // none
+    if (v_uv > 1700000)   return 1u;   // both（1.70 V）
+    if (v_uv > 1400000)   return 2u;   // external only（1.40 V）
     return 3u;
 }
 
@@ -323,20 +372,20 @@ static constexpr uint64_t DM_AUTO_S1_TIMEOUT_MS        = 5000ull;  // 5s
 /** @brief Stage1 失败后回退时间（1.5s） */
 static constexpr uint64_t DM_AUTO_S1_FAIL_RETRACT_MS   = 1500ull;  // 1.5s
 
-/** @brief Stage2 目标推料距离（120mm） */
-static constexpr float    DM_AUTO_S2_TARGET_M          = 0.120f;   // 120mm
-/** @brief Stage2 中止阈值（75%）：压力超过此值中止推料 */
-static constexpr float    DM_AUTO_BUF_ABORT_PCT        = 75.0f;    // abort push
-/** @brief Stage2 恢复阈值（50.2%）：回退到此值重新尝试 */
-static constexpr float    DM_AUTO_BUF_RECOVER_PCT      = 50.2f;    // retract-to
+/** @brief Stage2 目标推料距离（120mm = 120000 µm） */
+static constexpr int32_t  DM_AUTO_S2_TARGET_UM         = 120 * 1000;   // µm
+/** @brief Stage2 中止阈值（7500 厘% = 75%）：压力超过此值中止推料 */
+static constexpr int32_t  DM_AUTO_BUF_ABORT_CC         = 7500;         // abort push
+/** @brief Stage2 恢复阈值（5020 厘% = 50.2%）：回退到此值重新尝试 */
+static constexpr int32_t  DM_AUTO_BUF_RECOVER_CC       = 5020;         // retract-to
 /** @brief Stage2 失败后额外回退时间（1.5s） */
 static constexpr uint64_t DM_AUTO_FAIL_EXTRA_MS        = 1500ull;  // extra retract
-/** @brief 自动加载推料 PWM（90%占空比） */
-static constexpr float    DM_AUTO_PWM_PUSH             = 900.0f;   // push strength
-/** @brief 自动加载回退 PWM（90%占空比） */
-static constexpr float    DM_AUTO_PWM_PULL             = 900.0f;   // retract strength
-/** @brief 自动加载期间的PWM限制值 */
-static constexpr float    DM_AUTO_IDLE_LIM             = 950.0f;   // clamp only
+/** @brief 自动加载推料 PWM（900 → 900000 毫 PWM） */
+static constexpr int32_t  DM_AUTO_PWM_PUSH             = 900 * kPwmM;  // push strength
+/** @brief 自动加载回退 PWM（900 → 900000 毫 PWM） */
+static constexpr int32_t  DM_AUTO_PWM_PULL             = 900 * kPwmM;  // retract strength
+/** @brief 自动加载期间的PWM限制值（950 → 950000 毫 PWM） */
+static constexpr int32_t  DM_AUTO_IDLE_LIM             = 950 * kPwmM;  // clamp only
 
 /**
  * @brief DM 自动加载状态机状态枚举
@@ -366,7 +415,7 @@ static uint64_t dm_auto_t0_ms[4]        = {0ull,0ull,0ull,0ull};
 static uint32_t dm_auto_remain_count[4] = {0,0,0,0};
 static uint32_t dm_auto_last_count[4] = {0,0,0,0};
 static uint8_t dm_idle_empty[4] = {0,0,0,0};
-static constexpr uint32_t DM_AUTO_S2_TARGET_COUNT = distance_counts(DM_AUTO_S2_TARGET_M);
+static constexpr uint32_t DM_AUTO_S2_TARGET_COUNT = distance_counts(DM_AUTO_S2_TARGET_UM);
 
 static uint64_t dm_loaded_drop_t0_ms[4] = {0ull,0ull,0ull,0ull};
 
@@ -392,22 +441,22 @@ static void dm_auto_reset_state(uint8_t ch)
 #endif
 
 /* ==================== 自动卸料参数 ==================== */
-/** @brief 自动卸料触发阈值（80%）：压力超过此值触发 */
-static constexpr float    AUTO_UNLOAD_START_PCT      = 80.0f;
-/** @brief 中性区下界（45%）：回到此值以下确认卸料成功 */
-static constexpr float    AUTO_UNLOAD_NEUTRAL_LO_PCT = 45.0f;
-/** @brief 中性区上界（55%）：在此区间内确认成功 */
-static constexpr float    AUTO_UNLOAD_NEUTRAL_HI_PCT = 55.0f;
-/** @brief 中止阈值（35%）：低于此值中止卸料 */
-static constexpr float    AUTO_UNLOAD_ABORT_PCT      = 35.0f;
+/** @brief 自动卸料触发阈值（8000 厘% = 80%）：压力超过此值触发 */
+static constexpr int32_t  AUTO_UNLOAD_START_CC      = 8000;
+/** @brief 中性区下界（4500 厘% = 45%）：回到此值以下确认卸料成功 */
+static constexpr int32_t  AUTO_UNLOAD_NEUTRAL_LO_CC = 4500;
+/** @brief 中性区上界（5500 厘% = 55%）：在此区间内确认成功 */
+static constexpr int32_t  AUTO_UNLOAD_NEUTRAL_HI_CC = 5500;
+/** @brief 中止阈值（3500 厘% = 35%）：低于此值中止卸料 */
+static constexpr int32_t  AUTO_UNLOAD_ABORT_CC      = 3500;
 /** @brief 预备时间（1s）：触发后等待确认持续高压力 */
 static constexpr uint64_t AUTO_UNLOAD_ARM_MS         = 1000ull;
 /** @brief 最大执行时间（15s）：超时强制停止 */
 static constexpr uint64_t AUTO_UNLOAD_MAX_MS         = 15000ull;
 /** @brief 空载检测时间（1.5s）：压力低于中性区后持续此时间确认完成 */
 static constexpr uint64_t AUTO_UNLOAD_EMPTY_MS       = 1500ull;
-/** @brief 回退PWM（85%占空比） */
-static constexpr float    AUTO_UNLOAD_PWM_PULL       = 850.0f;
+/** @brief 回退PWM（85%占空比 → 850000 毫 PWM） */
+static constexpr int32_t  AUTO_UNLOAD_PWM_PULL       = 850 * kPwmM;
 
 /** @brief 自动卸料预备状态标志（1=已触发等待确认） */
 static uint8_t  auto_unload_arm[4]          = {0,0,0,0};
@@ -425,8 +474,11 @@ static uint64_t auto_unload_empty_t0_ms[4]  = {0ull,0ull,0ull,0ull};
 /** @brief 各通道是否物理插入（true=已插入，ADC 0.3V~3.0V） */
 bool filament_channel_inserted[4]       = {false, false, false, false};
 
-/** @brief PID 压力控制器P增益（25.0） */
-static constexpr float MC_PULL_PIDP_PCT = 25.0f;
+/** @brief PID 压力控制器 P 增益（原 25.0）。
+ *  【定点化】误差单位为厘百分比，输出为毫 PWM：
+ *        out_milli = 25 [PWM/%] × E[%] × 1000 = 25 × E_cc × 10 = 250 × E_cc
+ *  故换算到定点域后 P 增益系数为 250。 */
+static constexpr int32_t MC_PULL_PIDP_NUM = 250;
 
 /** @brief 低压力死区下界（30%）：低于此值状态=-1 */
 static constexpr int MC_PULL_DEADBAND_PCT_LOW  = 30;
@@ -439,60 +491,66 @@ static constexpr int MC_PULL_DEADBAND_PCT_HIGH = 70;
  * BMCU_SOFT_LOAD=A1 Mini, BMCU_P1S=P1S, 默认=A1
  * Stage1:快速进料, Stage2:保持, ON_USE:打印中压力控制
  */
+/* 【定点化】以下参数全部改为整数常量（编译期换算，不产生运行期浮点）：
+ *   *_PCT      → 厘百分比 (0.01%)，例 90.0f → 9000
+ *   *_PWM_*    → 毫 PWM (0.001)，例 480.0f → 480000
+ *   用于换算的 (int32_t)(X * 100.0f) / (int32_t)(X * kPwmM) 都是 constexpr，
+ *   由编译器在编译期完成，与旧 float 行为逐位一致。 */
 #if BMCU_SOFT_LOAD
     /* ---- A1 Mini 参数 ---- */
-    static constexpr int   MC_LOAD_S1_FAST_PCT       = 75;     /**< Stage1 快速进料百分比 */
-    static constexpr int   MC_LOAD_S1_HARD_STOP_PCT  = 90;     /**< Stage1 硬限位（安全保护） */
-    static constexpr int   MC_LOAD_S1_HARD_HYS       = 2;      /**< Stage1 硬限位滞回 */
-    static constexpr float MC_LOAD_S2_HOLD_TARGET_PCT    = 75.0f;  /**< Stage2 保持目标 */
-    static constexpr float MC_LOAD_S2_HOLD_BAND_LO_DELTA = 0.3f;   /**< Stage2 区间下界偏移 */
-    static constexpr float MC_LOAD_S2_PUSH_START_PCT     = 55.0f;  /**< Stage2 开始推料百分比 */
-    static constexpr float MC_LOAD_S2_PWM_HI             = 480.0f; /**< Stage2 推料上限PWM */
-    static constexpr float MC_LOAD_S2_PWM_LO             = 1000.0f;/**< Stage2 最大推力PWM */
-    static constexpr float MC_ON_USE_TARGET_PCT    = 52.0f;  /**< ON_USE 压力目标 */
-    static constexpr float MC_ON_USE_BAND_LO_DELTA = 0.2f;   /**< ON_USE 区间下界偏移 */
-    static constexpr float MC_ON_USE_BAND_HI_PCT   = 60.0f;  /**< ON_USE 区间上界 */
+    static constexpr int     MC_LOAD_S1_FAST_PCT       = 75;    /**< Stage1 快速进料百分比 */
+    static constexpr int     MC_LOAD_S1_HARD_STOP_PCT  = 90;    /**< Stage1 硬限位（安全保护） */
+    static constexpr int     MC_LOAD_S1_HARD_HYS       = 2;     /**< Stage1 硬限位滞回 */
+    static constexpr int32_t MC_LOAD_S2_HOLD_TARGET_PCT    = 7500;   /**< Stage2 保持目标（厘%） */
+    static constexpr int32_t MC_LOAD_S2_HOLD_BAND_LO_DELTA = 30;     /**< Stage2 区间下界偏移（厘%） */
+    static constexpr int32_t MC_LOAD_S2_PUSH_START_PCT     = 5500;   /**< Stage2 开始推料百分比（厘%） */
+    static constexpr int32_t MC_LOAD_S2_PWM_HI             = 480000; /**< Stage2 推料上限PWM（毫PWM） */
+    static constexpr int32_t MC_LOAD_S2_PWM_LO             = 1000000;/**< Stage2 最大推力PWM（毫PWM） */
+    static constexpr int32_t MC_ON_USE_TARGET_PCT    = 5200;   /**< ON_USE 压力目标（厘%） */
+    static constexpr int32_t MC_ON_USE_BAND_LO_DELTA = 20;     /**< ON_USE 区间下界偏移（厘%） */
+    static constexpr int32_t MC_ON_USE_BAND_HI_PCT   = 6000;   /**< ON_USE 区间上界（厘%） */
 #elif BMCU_P1S  // P1S
     /* ---- P1S 参数 ---- */
-    static constexpr int   MC_LOAD_S1_FAST_PCT       = 88;
-    static constexpr int   MC_LOAD_S1_HARD_STOP_PCT  = 97;
-    static constexpr int   MC_LOAD_S1_HARD_HYS       = 2;
-    static constexpr float MC_LOAD_S2_HOLD_TARGET_PCT    = 95.0f;
-    static constexpr float MC_LOAD_S2_HOLD_BAND_LO_DELTA = 1.0f;
-    static constexpr float MC_LOAD_S2_PUSH_START_PCT     = 88.0f;
-    static constexpr float MC_LOAD_S2_PWM_HI             = 550.0f;
-    static constexpr float MC_LOAD_S2_PWM_LO             = 1000.0f;
-    static constexpr float MC_ON_USE_TARGET_PCT    = 54.0f;
-    static constexpr float MC_ON_USE_BAND_LO_DELTA = 0.2f;
-    static constexpr float MC_ON_USE_BAND_HI_PCT   = 65.0f;
+    static constexpr int     MC_LOAD_S1_FAST_PCT       = 88;
+    static constexpr int     MC_LOAD_S1_HARD_STOP_PCT  = 97;
+    static constexpr int     MC_LOAD_S1_HARD_HYS       = 2;
+    static constexpr int32_t MC_LOAD_S2_HOLD_TARGET_PCT    = 9500;
+    static constexpr int32_t MC_LOAD_S2_HOLD_BAND_LO_DELTA = 100;
+    static constexpr int32_t MC_LOAD_S2_PUSH_START_PCT     = 8800;
+    static constexpr int32_t MC_LOAD_S2_PWM_HI             = 550000;
+    static constexpr int32_t MC_LOAD_S2_PWM_LO             = 1000000;
+    static constexpr int32_t MC_ON_USE_TARGET_PCT    = 5400;
+    static constexpr int32_t MC_ON_USE_BAND_LO_DELTA = 20;
+    static constexpr int32_t MC_ON_USE_BAND_HI_PCT   = 6500;
 #else        // A1
     /* ---- A1 默认参数 ---- */
-    static constexpr int   MC_LOAD_S1_FAST_PCT       = 85;
-    static constexpr int   MC_LOAD_S1_HARD_STOP_PCT  = 95;
-    static constexpr int   MC_LOAD_S1_HARD_HYS       = 2;
-    static constexpr float MC_LOAD_S2_HOLD_TARGET_PCT    = 90.0f;
-    static constexpr float MC_LOAD_S2_HOLD_BAND_LO_DELTA = 0.3f;
-    static constexpr float MC_LOAD_S2_PUSH_START_PCT     = 80.0f;
-    static constexpr float MC_LOAD_S2_PWM_HI             = 480.0f;
-    static constexpr float MC_LOAD_S2_PWM_LO             = 1000.0f;
-    static constexpr float MC_ON_USE_TARGET_PCT    = 52.0f;
-    static constexpr float MC_ON_USE_BAND_LO_DELTA = 0.2f;
-    static constexpr float MC_ON_USE_BAND_HI_PCT   = 60.0f;
+    static constexpr int     MC_LOAD_S1_FAST_PCT       = 85;
+    static constexpr int     MC_LOAD_S1_HARD_STOP_PCT  = 95;
+    static constexpr int     MC_LOAD_S1_HARD_HYS       = 2;
+    static constexpr int32_t MC_LOAD_S2_HOLD_TARGET_PCT    = 9000;
+    static constexpr int32_t MC_LOAD_S2_HOLD_BAND_LO_DELTA = 30;
+    static constexpr int32_t MC_LOAD_S2_PUSH_START_PCT     = 8000;
+    static constexpr int32_t MC_LOAD_S2_PWM_HI             = 480000;
+    static constexpr int32_t MC_LOAD_S2_PWM_LO             = 1000000;
+    static constexpr int32_t MC_ON_USE_TARGET_PCT    = 5200;
+    static constexpr int32_t MC_ON_USE_BAND_LO_DELTA = 20;
+    static constexpr int32_t MC_ON_USE_BAND_HI_PCT   = 6000;
 #endif
 // ====================================================
 
 static constexpr uint64_t ON_USE_HANDOFF_MS = 10000ull;
-static constexpr float ON_USE_HANDOFF_CEILING_HYS_PCT = 0.25f;
+/** @brief 交接上限滞回（25 厘% = 0.25%） */
+static constexpr int32_t ON_USE_HANDOFF_CEILING_HYS_CC = 25;
 
 /* ==================== 校准重置参数 ==================== */
 /** @brief 校准重置长按时间（5秒） */
 static constexpr uint32_t CAL_RESET_HOLD_MS     = 5000;
 /** @brief 触发校准重置的百分比阈值 */
 static constexpr int      CAL_RESET_PCT_THRESH  = 15;
-/** @brief 校准重置电压偏移容差（0.10V） */
-static constexpr float    CAL_RESET_V_DELTA     = 0.10f;
-/** @brief 校准重置最小电压容差（0.03V） */
-static constexpr float    CAL_RESET_NEAR_MIN    = 0.03f;
+/** @brief 校准重置电压偏移容差（0.10 V = 100000 µV） */
+static constexpr int32_t  CAL_RESET_V_DELTA_UV  = 100000;
+/** @brief 校准重置最小电压容差（0.03 V = 30000 µV） */
+static constexpr int32_t  CAL_RESET_NEAR_MIN_UV = 30000;
 
 /** @brief 当前被按住的通道号（-1=无） */
 static int      g_hold_ch = -1;
@@ -565,43 +623,52 @@ static void calibration_reset_and_reboot()
 }
 
 /**
- * @brief 将传感器电压转换为百分比（0~100%）
- *        分段线性映射，以1.65V为中位点：
- *        <=1.65V: 从vmin线性映射到0%~50%, >1.65V: 从1.65V映射到50%~100%
+ * @brief 将传感器电压转换为压力百分比（厘百分比 0~10000）
+ *        分段线性映射，以 1.65 V 为中位点：
+ *        <=1.65V: 从 vmin 线性映射到 0%~50%, >1.65V: 从 1.65V 映射到 50%~100%
+ * @param ch   通道号
+ * @param v_uv 已补偿偏移与极性的电压（微伏）
+ * @return 压力百分比，单位厘百分比（0.01%），范围 0~10000
+ * @note 【定点化】分母 den 已保证 >= 50000（0.05 V）。为避免
+ *       (v - vmin) × 5000 溢出 int32，先把分子分母同除 16 等比缩小，
+ *       由此引入的绝对误差 < 5000×16/den ≤ 1.6 厘%（即 < 0.016%）。
  */
-static float pull_v_to_percent_f(uint8_t ch, float v)
+static int32_t pull_cc_from_uv(uint8_t ch, int32_t v_uv)
 {
-    constexpr float c = 1.65f;
+    constexpr int32_t c = 1650000;          /* 1.65 V 中位点（µV） */
 
-    float vmin = MC_PULL_V_MIN[ch];
-    float vmax = MC_PULL_V_MAX[ch];
+    int32_t vmin = MC_PULL_V_MIN[ch];
+    int32_t vmax = MC_PULL_V_MAX[ch];
 
-    if (vmin > 1.60f) vmin = 1.60f;
-    if (vmax < 1.70f) vmax = 1.70f;
-    if (vmax <= (vmin + 0.10f)) { vmin = 1.55f; vmax = 1.75f; }
+    if (vmin > 1600000) vmin = 1600000;     /* 1.60 V */
+    if (vmax < 1700000) vmax = 1700000;     /* 1.70 V */
+    if (vmax <= (vmin + 100000)) { vmin = 1550000; vmax = 1750000; }  /* 0.10 V 容差 */
 
-    float pos01;
-    if (v <= c)
+    int32_t pos_cc;
+    if (v_uv <= c)
     {
-        float den = c - vmin;
-        if (den < 0.05f) den = 0.05f;
-        pos01 = 0.5f * (v - vmin) / den;
+        int32_t den = c - vmin;             /* 单位 µV */
+        if (den < 50000) den = 50000;       /* 0.05 V 下限 */
+        pos_cc = (int32_t)(((int32_t)((v_uv - vmin) >> 4) * 5000) / (den >> 4));
     }
     else
     {
-        float den = vmax - c;
-        if (den < 0.05f) den = 0.05f;
-        pos01 = 0.5f + 0.5f * (v - c) / den;
+        int32_t den = vmax - c;
+        if (den < 50000) den = 50000;
+        pos_cc = 5000 + (int32_t)(((int32_t)((v_uv - c) >> 4) * 5000) / (den >> 4));
     }
 
-    return clampf(pos01, 0.0f, 1.0f) * 100.0f;
+    if (pos_cc < 0) pos_cc = 0;
+    if (pos_cc > 10000) pos_cc = 10000;
+    return pos_cc;
 }
 
-/** @brief 根据极性反转电压：当POLARITY<0时返回 3.3V - v */
-static inline float pull_v_apply_polarity(uint8_t ch, float v)
+/** @brief 根据极性反转电压：当 POLARITY<0 时返回 3.3V - v（微伏）
+ *  【定点化】原 float 版为 3.30f - v，现全部按微伏整数运算 */
+static inline int32_t pull_v_apply_polarity(uint8_t ch, int32_t v_uv)
 {
-    if (MC_PULL_POLARITY[ch] < 0) return 3.30f - v;
-    return v;
+    if (MC_PULL_POLARITY[ch] < 0) return 3300000 - v_uv;
+    return v_uv;
 }
 
 /**
@@ -623,22 +690,22 @@ void MC_PULL_detect_channels_inserted()
 
     constexpr uint8_t idx[kChCount] = {6,4,2,0};
     constexpr int N = 16;
-    float s[kChCount] = {0,0,0,0};
+    /* 【定点化】累加微伏：16 × 3,250,000 = 5.2e7，int32 足够 */
+    int32_t s[kChCount] = {0,0,0,0};
 
     for (int i = 0; i < N; i++)
     {
-        const float *v = ADC_DMA_get_value();
+        const int32_t *v = ADC_DMA_get_value();
         for (uint8_t ch = 0; ch < kChCount; ch++) s[ch] += v[idx[ch]];
         delay(2);
     }
 
-    constexpr float VMIN = 0.30f;
-    constexpr float VMAX = 3.00f;
-    constexpr float invN = 1.0f / (float)N;
+    constexpr int32_t VMIN = 300000;    /* 0.30 V */
+    constexpr int32_t VMAX = 3000000;   /* 3.00 V */
 
     for (uint8_t ch = 0; ch < kChCount; ch++)
     {
-        const float a = s[ch] * invN;
+        const int32_t a = s[ch] / N;    /* N=16 为常量除法 */
         filament_channel_inserted[ch] = (a > VMIN) && (a < VMAX);
     }
 }
@@ -656,27 +723,28 @@ static inline void MC_PULL_ONLINE_init()
  */
 static inline void MC_PULL_ONLINE_read(uint32_t now_ticks)
 {
-    const float *data = ADC_DMA_get_value();
+    const int32_t *data = ADC_DMA_get_value();
     static uint32_t last_generation = 0u;
     const uint32_t generation = ADC_DMA_generation();
     g_key_sample_fresh = generation != last_generation && ADC_DMA_ready();
     last_generation = generation;
 
-    /* 映射 ADC 通道 -> 耗材通道（交错排列：偶数=速度传感器，奇数=微动开关） */
+    /* 映射 ADC 通道 -> 耗材通道（交错排列：偶数=速度传感器，奇数=微动开关）
+     * 【定点化】ADC 输出即 int32 微伏，全程整数运算，不再经过 float */
     MC_PULL_stu_raw[3] = pull_v_apply_polarity(3u, data[0] + MC_PULL_V_OFFSET[3]);
-    const float key3   = data[1];
+    const int32_t key3 = data[1];
 
     MC_PULL_stu_raw[2] = pull_v_apply_polarity(2u, data[2] + MC_PULL_V_OFFSET[2]);
-    const float key2   = data[3];
+    const int32_t key2 = data[3];
 
     MC_PULL_stu_raw[1] = pull_v_apply_polarity(1u, data[4] + MC_PULL_V_OFFSET[1]);
-    const float key1   = data[5];
+    const int32_t key1 = data[5];
 
     MC_PULL_stu_raw[0] = pull_v_apply_polarity(0u, data[6] + MC_PULL_V_OFFSET[0]);
-    const float key0   = data[7];
+    const int32_t key0 = data[7];
 
 #if BMCU_DM_TWO_MICROSWITCH
-    const float keyv[4] = { key0, key1, key2, key3 };
+    const int32_t keyv[4] = { key0, key1, key2, key3 };
 
     /* --- Buffer Gesture Load（缓冲手势加载检测）---
      * 检测耗材插入的手势序列：空闲→低电压→恢复→中位确认
@@ -714,15 +782,15 @@ static inline void MC_PULL_ONLINE_read(uint32_t now_ticks)
 
         if (!gst_active[i])
         {
-            const float pct_f = pull_v_to_percent_f(i, MC_PULL_stu_raw[i]);
+            const int32_t pct_cc = pull_cc_from_uv(i, MC_PULL_stu_raw[i]);
 
             if (gst_step[i] == 0)
             {
-                if (pct_f < 10.0f) { gst_step[i] = 1; gst_t0_ticks[i] = now_ticks; }
+                if (pct_cc < 1000) { gst_step[i] = 1; gst_t0_ticks[i] = now_ticks; }
             }
             else if (gst_step[i] == 1)
             {
-                if (pct_f > 15.0f) { gst_step[i] = 0; }
+                if (pct_cc > 1500) { gst_step[i] = 0; }
                 else if ((uint32_t)(now_ticks - gst_t0_ticks[i]) >= T100)
                 {
                     gst_step[i] = 2;
@@ -734,7 +802,7 @@ static inline void MC_PULL_ONLINE_read(uint32_t now_ticks)
                 {
                     gst_step[i] = 0;
                 }
-                else if (pct_f >= 45.0f && pct_f <= 55.0f)
+                else if (pct_cc >= 4500 && pct_cc <= 5500)
                 {
                     gst_active[i] = true;
                     gst_act_t0_ticks[i] = now_ticks;
@@ -745,7 +813,7 @@ static inline void MC_PULL_ONLINE_read(uint32_t now_ticks)
 
         if (gst_active[i])
         {
-            if (keyv[i] > 1.7f) gst_active[i] = false;
+            if (keyv[i] > 1700000) gst_active[i] = false;
             else if ((uint32_t)(now_ticks - gst_act_t0_ticks[i]) > T5500) gst_active[i] = false;
         }
 
@@ -759,10 +827,11 @@ static inline void MC_PULL_ONLINE_read(uint32_t now_ticks)
     /* --- End Buffer Gesture Load --- */
 #else
     /* 简单模式：仅根据微动开关电压判断在线（>1.7V=在线） */
-    MC_ONLINE_key_stu[3] = (filament_channel_inserted[3] && (key3 > 1.7f)) ? 1u : 0u;
-    MC_ONLINE_key_stu[2] = (filament_channel_inserted[2] && (key2 > 1.7f)) ? 1u : 0u;
-    MC_ONLINE_key_stu[1] = (filament_channel_inserted[1] && (key1 > 1.7f)) ? 1u : 0u;
-    MC_ONLINE_key_stu[0] = (filament_channel_inserted[0] && (key0 > 1.7f)) ? 1u : 0u;
+    /* 【定点化】1.7 V = 1700000 µV */
+    MC_ONLINE_key_stu[3] = (filament_channel_inserted[3] && (key3 > 1700000)) ? 1u : 0u;
+    MC_ONLINE_key_stu[2] = (filament_channel_inserted[2] && (key2 > 1700000)) ? 1u : 0u;
+    MC_ONLINE_key_stu[1] = (filament_channel_inserted[1] && (key1 > 1700000)) ? 1u : 0u;
+    MC_ONLINE_key_stu[0] = (filament_channel_inserted[0] && (key0 > 1700000)) ? 1u : 0u;
 #endif
 
 
@@ -775,16 +844,17 @@ static inline void MC_PULL_ONLINE_read(uint32_t now_ticks)
         if (!ins)
         {
             MC_ONLINE_key_stu[i] = 0;
-            MC_PULL_pct_f[i] = 50.0f;
+            MC_PULL_pct_cc[i] = 5000;
             MC_PULL_pct[i]   = 50;
             MC_PULL_stu[i]   = 0;
             continue;
         }
 
-        const float pct_f = pull_v_to_percent_f(i, MC_PULL_stu_raw[i]);
-        MC_PULL_pct_f[i] = pct_f;
+        const int32_t pct_cc = pull_cc_from_uv(i, MC_PULL_stu_raw[i]);
+        MC_PULL_pct_cc[i] = pct_cc;
 
-        int pct = (int)(pct_f + 0.5f);
+        /* 厘百分比 → 整数百分比，四舍五入（+50 再整除 100，与原 +0.5f 行为等价） */
+        int pct = (int)((pct_cc + 50) / 100);
         if (pct < 0) pct = 0;
         if (pct > 100) pct = 100;
         MC_PULL_pct[i] = (uint8_t)pct;
@@ -844,7 +914,7 @@ static inline void Motion_control_apply_saved()
         if (Motion_control_data_save.dm_key_none_cv[i] < 60u)
             Motion_control_data_save.dm_key_none_cv[i] = 60u;
 
-        if (!MC_PULL_calibration_is_valid(i)) MC_DM_KEY_NONE_THRESH[i] = 0.60f;
+        if (!MC_PULL_calibration_is_valid(i)) MC_DM_KEY_NONE_THRESH[i] = 600000;  /* 0.60 V */
     }
 }
 
@@ -888,7 +958,7 @@ static inline bool Motion_control_save()
 /** @brief 保存双微动开关"无料"阈值到Flash（合并现有数据） */
 bool Motion_control_save_dm_key_none_thresholds(void)
 {
-    float thr[4];
+    int32_t thr[4];
     for (uint8_t i = 0; i < kChCount; i++)
         thr[i] = MC_DM_KEY_NONE_THRESH[i];
 
@@ -907,63 +977,85 @@ bool Motion_control_save_dm_key_none_thresholds(void)
  * @brief 增量式PID控制器，用于电机速度/压力闭环控制
  *        output = P*error + ∫(I*error*dt) + D*(error-last_error)/dt
  *        带积分抗饱和和输出限幅
+ *
+ * 【定点化】
+ *   全部状态与增益改为 int32，误差单位由调用方按"已放大的自然单位"给出：
+ *     · 速度环：误差单位 µm/s（原 mm/s × 1000），输出单位 毫 PWM
+ *     · 压力环：误差单位 厘%（原 % × 100），输出单位 毫 PWM
+ *   原 float 参数 (P, I, D) 的语义被拆成三个整数：
+ *     P_num     —— 输出(毫PWM) = P_num × E
+ *     I_num/I_den —— 积分增量 ΔI = I_num × E × dt(100µs 为单位) / I_den
+ *   D（微分）在本工程中两处实例化都取 0（MOTOR_PID(2,20,0) 与
+ *   MOTOR_PID(25,0,0)），因此直接去掉微分项，避免 (E-E_last)/dt 的除法。
+ *
+ *   换算依据（见 _MOTOR_CONTROL 中 PID_speed / PID_pressure 的注释）：
+ *     PID_speed    原 P=2, I=20 → P_num=2,    I_num=1, I_den=500
+ *     PID_pressure 原 P=25, I=0 → P_num=250,  I_num=0（无积分）
  */
 class MOTOR_PID
 {
-    float P = 0;        /**< 比例增益 */
-    float I = 0;        /**< 积分增益 */
-    float D = 0;        /**< 微分增益 */
-    float I_save = 0;   /**< 积分累积值（带抗饱和） */
-    float E_last = 0;   /**< 上次误差（微分用） */
+    int32_t P_num = 0;      /**< 比例增益：输出(毫PWM) = P_num × 误差 */
+    int32_t I_num = 0;      /**< 积分增益分子（0 = 无积分） */
+    int32_t I_den = 1;      /**< 积分增益分母 */
+    int32_t I_save = 0;     /**< 积分累积值（毫 PWM，带抗饱和） */
 
-    float pid_MAX = PWM_lim;    /**< 输出上限 */
-    float pid_MIN = -PWM_lim;   /**< 输出下限 */
-    float pid_range = (pid_MAX - pid_MIN) * 0.5f;  /**< 积分抗饱和范围 */
+    int32_t pid_MAX = PWM_lim * kPwmM;                        /**< 输出上限 */
+    int32_t pid_MIN = -PWM_lim * kPwmM;                       /**< 输出下限 */
+    int32_t pid_range = PWM_lim * kPwmM;                      /**< 积分抗饱和范围 */
+
+    /** @brief 积分输入误差的钳位上限（µV 级误差也不可能到这个量级，纯防溢出） */
+    static constexpr int32_t E_INT_CLAMP = 400000;
 
 public:
     MOTOR_PID() = default;
 
-    /** @brief 构造函数，使用指定PID参数初始化 */
-    MOTOR_PID(float P_set, float I_set, float D_set)
+    /** @brief 构造函数，使用指定整数增益初始化 */
+    MOTOR_PID(int32_t P_set, int32_t I_set_num, int32_t I_set_den)
     {
-        init_PID(P_set, I_set, D_set);
+        init_PID(P_set, I_set_num, I_set_den);
     }
 
-    /** @brief 初始化PID参数并清零状态 */
-    void init_PID(float P_set, float I_set, float D_set)
+    /** @brief 初始化PID整数增益并清零状态 */
+    void init_PID(int32_t P_set, int32_t I_set_num, int32_t I_set_den)
     {
-        P = P_set;
-        I = I_set;
-        D = D_set;
+        P_num = P_set;
+        I_num = I_set_num;
+        I_den = (I_set_den > 0) ? I_set_den : 1;
         I_save = 0;
-        E_last = 0;
     }
 
-    /** @brief 计算PID输出（带积分抗饱和和输出限幅） */
-    float caculate(float E, float time_E)
+    /**
+     * @brief 计算PID输出（带积分抗饱和和输出限幅）
+     * @param E        误差（速度环：µm/s；压力环：厘%）
+     * @param dt_us100 时间步长，单位 100 µs（= time_us / 100）
+     * @return 输出，单位毫 PWM，已限幅到 ±PWM_lim×1000
+     */
+    int32_t caculate(int32_t E, uint32_t dt_us100)
     {
-        I_save += I * E * time_E;
-        if (I_save > pid_range)  I_save = pid_range;
-        if (I_save < -pid_range) I_save = -pid_range;
+        if (I_num != 0)
+        {
+            /* 误差钳位后参与积分：|E_clamped| × dt(≤2000) × I_num(≤1) < 2^31 */
+            int32_t Ei = E;
+            if (Ei >  E_INT_CLAMP) Ei =  E_INT_CLAMP;
+            if (Ei < -E_INT_CLAMP) Ei = -E_INT_CLAMP;
 
-        float out;
-        if (time_E != 0.0f)
-            out = P * E + I_save + D * (E - E_last) / time_E;
-        else
-            out = P * E + I_save;
+            I_save += (int32_t)((I_num * Ei * (int32_t)dt_us100) / I_den);
+            if (I_save >  pid_range) I_save =  pid_range;
+            if (I_save < -pid_range) I_save = -pid_range;
+        }
+
+        int32_t out = P_num * E + I_save;
 
         if (out > pid_MAX) out = pid_MAX;
         if (out < pid_MIN) out = pid_MIN;
 
-        E_last = E;
         return out;
     }
 
-    /** @brief 清零积分和微分历史（状态切换时调用） */
+    /** @brief 清零积分历史（状态切换时调用） */
     void clear()
     {
         I_save = 0;
-        E_last = 0;
     }
 };
 
@@ -1003,9 +1095,11 @@ public:
 
     uint64_t motor_stop_time = 0;
 
-    float    post_sendout_retract_thresh_pct = -1.0f;
+    /* 【定点化】哨兵值由 -1.0f 改为 -100（= -1.0 %，单位厘百分比）
+     * 两个阈值量都只在 >= 0 时被视为有效，-100 与 -1.0f 的判定效果一致 */
+    int32_t  post_sendout_retract_thresh_pct = -100;
     uint8_t  retract_hys_active = 0;
-    float    on_use_handoff_ceiling_pct = -1.0f;
+    int32_t  on_use_handoff_ceiling_pct = -100;
     uint64_t on_use_handoff_t0_ms = 0ull;
 
     uint64_t send_start_ms = 0;
@@ -1016,21 +1110,29 @@ public:
 
     bool send_stop_latch = false;
 
-    MOTOR_PID PID_speed    = MOTOR_PID(2, 20, 0);
-    MOTOR_PID PID_pressure = MOTOR_PID(MC_PULL_PIDP_PCT, 0, 0);
+    /* 【定点化】整数增益换算（详见 MOTOR_PID 类注释）：
+     *   PID_speed    原 (P=2, I=20, D=0)
+     *       · P：误差=µm/s，输出毫PWM = 2 × E_um
+     *       · I：ΔI = E_um × dt_100µs / 500，等价于原 20 × E_mm/s × dt_s
+     *   PID_pressure 原 (P=25, I=0, D=0)
+     *       · P：误差=厘%，输出毫PWM = 250 × E_cc（即 25 PWM 每 %） */
+    MOTOR_PID PID_speed    = MOTOR_PID(2, 1, 500);
+    MOTOR_PID PID_pressure = MOTOR_PID(MC_PULL_PIDP_NUM, 0, 1);
 
-    float pwm_zero = 500;
-    float dir = 0;
+    int32_t pwm_zero = 500 * kPwmM;    /**< 空闲基础 PWM（毫 PWM，原 500） */
+    /** @brief 电机方向：-1 / 0 / +1（原为 float，取值实际只有这三个）
+     *  【定点化】改整数后 `dir != 0`、`x * dir < 0` 等判定全部直接做整数比较 */
+    int32_t dir = 0;
 
-    static float x_prev[4];
+    static int32_t x_prev[4];
 
     bool  send_hard = false;
 
     /** @brief 构造函数 */
     _MOTOR_CONTROL(int _CHx) : CHx(_CHx) {}
 
-    /** @brief 设置空闲基础PWM值 */
-    void set_pwm_zero(float _pwm_zero) { pwm_zero = _pwm_zero; }
+    /** @brief 设置空闲基础PWM值（毫 PWM） */
+    void set_pwm_zero(int32_t _pwm_zero) { pwm_zero = _pwm_zero; }
 
     /** @brief 设置运动模式（使用当前时间） */
     void set_motion(filament_motion_enum _motion, uint64_t over_time)
@@ -1123,15 +1225,15 @@ public:
 
         if (_motion == filament_motion_enum::filament_motion_send)
         {
-            post_sendout_retract_thresh_pct = -1.0f;
+            post_sendout_retract_thresh_pct = -100;
             retract_hys_active = 0;
         }
 
         if (_motion == filament_motion_enum::filament_motion_before_on_use || _motion == filament_motion_enum::filament_motion_stop_on_use)
         {
-            float p = MC_PULL_pct_f[CHx];
-            if (p < 0.0f) p = 0.0f;
-            if (p > 100.0f) p = 100.0f;
+            int32_t p = MC_PULL_pct_cc[CHx];
+            if (p < 0) p = 0;
+            if (p > 10000) p = 10000;
             post_sendout_retract_thresh_pct = p;
             retract_hys_active = 0;
         }
@@ -1139,9 +1241,9 @@ public:
         if (_motion == filament_motion_enum::filament_motion_pressure_ctrl_on_use)
         {
             retract_hys_active = 0;
-            float p = MC_PULL_pct_f[CHx];
-            if (p < 0.0f) p = 0.0f;
-            if (p > 100.0f) p = 100.0f;
+            int32_t p = MC_PULL_pct_cc[CHx];
+            if (p < 0) p = 0;
+            if (p > 10000) p = 10000;
 
             post_sendout_retract_thresh_pct = p;
 
@@ -1149,7 +1251,7 @@ public:
                 prev == filament_motion_enum::filament_motion_stop_on_use ||
                 prev == filament_motion_enum::filament_motion_send)
             {
-                const float band_hi = MC_ON_USE_BAND_HI_PCT;
+                const int32_t band_hi = MC_ON_USE_BAND_HI_PCT;
                 if (p > band_hi)
                 {
                     on_use_handoff_ceiling_pct = p;
@@ -1157,38 +1259,38 @@ public:
                 }
                 else
                 {
-                    on_use_handoff_ceiling_pct = -1.0f;
+                    on_use_handoff_ceiling_pct = -100;
                     on_use_handoff_t0_ms = 0ull;
                 }
             }
             else
             {
-                on_use_handoff_ceiling_pct = -1.0f;
+                on_use_handoff_ceiling_pct = -100;
                 on_use_handoff_t0_ms = 0ull;
             }
         }
         else if (prev == filament_motion_enum::filament_motion_pressure_ctrl_on_use)
         {
-            post_sendout_retract_thresh_pct = -1.0f;
+            post_sendout_retract_thresh_pct = -100;
             retract_hys_active   = 0;
-            on_use_handoff_ceiling_pct   = -1.0f;
+            on_use_handoff_ceiling_pct   = -100;
             on_use_handoff_t0_ms = 0ull;
         }
 
         if (_motion == filament_motion_enum::filament_motion_pull)
         {
-            post_sendout_retract_thresh_pct = -1.0f;
+            post_sendout_retract_thresh_pct = -100;
             retract_hys_active = 0;
         }
 
         if (!keep_pwm)
         {
-            x_prev[CHx] = 0.0f;
+            x_prev[CHx] = 0;
         }
         else
         {
-            if (x_prev[CHx] > 600.0f)  x_prev[CHx] = 600.0f;
-            if (x_prev[CHx] < -850.0f) x_prev[CHx] = -850.0f;
+            if (x_prev[CHx] >  600 * kPwmM) x_prev[CHx] =  600 * kPwmM;
+            if (x_prev[CHx] < -850 * kPwmM) x_prev[CHx] = -850 * kPwmM;
         }
     }
 
@@ -1200,81 +1302,84 @@ public:
      *        压力>阈值：滞回回退, 压力在推料区：线性推料, 正常：停止
      */
     static inline void hold_load(
-        float pct,
-        float dir,
+        int32_t pct_cc,
+        int32_t dir,
         MOTOR_PID &PID_pressure,
-        float &post_sendout_retract_thresh_pct,
+        int32_t &post_sendout_retract_thresh_pct,
         uint8_t &retract_hys_active,
-        float &x,
+        int32_t &x,
         bool  &on_use_need_move,
-        float &on_use_abs_err,
+        int32_t &on_use_abs_err,
         bool  &on_use_linear
     )
     {
-        constexpr float hold_target = MC_LOAD_S2_HOLD_TARGET_PCT;
+        /* 【定点化】pct/thresh/x 的单位分别是 厘%、厘%、毫 PWM；
+         * dir 为 -1/0/+1 的整数方向；on_use_abs_err 单位 厘%。 */
+        constexpr int32_t hold_target = MC_LOAD_S2_HOLD_TARGET_PCT;   /* 厘% */
 
-        float thresh = post_sendout_retract_thresh_pct;
+        int32_t thresh = post_sendout_retract_thresh_pct;
         if (thresh < hold_target) thresh = hold_target;
 
-        if (pct > thresh)
+        if (pct_cc > thresh)
         {
-            const float target = thresh;
+            const int32_t target = thresh;
 
-            const float start_retract = target + 0.25f;
-            const float stop_retract  = target + 0.00f;
+            const int32_t start_retract = target + 25;   /* +0.25 % = 25 厘% */
+            const int32_t stop_retract  = target;
 
-            retract_hys_active = hyst_u8(retract_hys_active, pct, start_retract, stop_retract);
+            retract_hys_active = hyst_u8(retract_hys_active, pct_cc, start_retract, stop_retract);
 
             if (!retract_hys_active)
             {
-                x = 0.0f;
+                x = 0;
                 PID_pressure.clear();
                 on_use_need_move = false;
-                on_use_abs_err   = 0.0f;
+                on_use_abs_err   = 0;
                 on_use_linear    = false;
             }
             else
             {
-                const float err = pct - target;
+                const int32_t err = pct_cc - target;
                 on_use_need_move = true;
                 on_use_abs_err   = err;
                 on_use_linear    = false;
 
-                const float mag = retract_mag_from_err(err, 850.0f);
+                const int32_t mag = retract_mag_from_err(err, 850 * kPwmM);
 
                 x = dir * mag;
-                if (x * dir < 0.0f) x = 0.0f;
+                if (x * dir < 0) x = 0;
             }
         }
         else
         {
             retract_hys_active = 0;
 
-            constexpr float push_hi_pct    = hold_target - MC_LOAD_S2_HOLD_BAND_LO_DELTA;
-            constexpr float push_start_pct = MC_LOAD_S2_PUSH_START_PCT;
-            constexpr float pwm_hi         = MC_LOAD_S2_PWM_HI;
-            constexpr float pwm_lo         = MC_LOAD_S2_PWM_LO;
-            constexpr float slope          = (pwm_lo - pwm_hi) / (push_hi_pct - push_start_pct);
+            constexpr int32_t push_hi_pct    = hold_target - MC_LOAD_S2_HOLD_BAND_LO_DELTA;
+            constexpr int32_t push_start_pct = MC_LOAD_S2_PUSH_START_PCT;
+            constexpr int32_t pwm_hi         = MC_LOAD_S2_PWM_HI;
+            constexpr int32_t pwm_lo         = MC_LOAD_S2_PWM_LO;
+            /* slope 单位：毫 PWM / 厘%（与 pwm_hi/pwm_lo、push_*_pct 同量纲，直接相除） */
+            constexpr int32_t slope          = (pwm_lo - pwm_hi) / (push_hi_pct - push_start_pct);
 
-            if (pct >= push_hi_pct)
+            if (pct_cc >= push_hi_pct)
             {
-                x = 0.0f;
+                x = 0;
                 PID_pressure.clear();
                 on_use_need_move = false;
-                on_use_abs_err   = 0.0f;
+                on_use_abs_err   = 0;
                 on_use_linear    = false;
             }
             else
             {
-                float pwm;
-                if (pct <= push_start_pct) pwm = pwm_lo;
-                else                       pwm = pwm_hi + (push_hi_pct - pct) * slope;
+                int32_t pwm;
+                if (pct_cc <= push_start_pct) pwm = pwm_lo;
+                else                          pwm = pwm_hi + (push_hi_pct - pct_cc) * slope;
 
                 x = -dir * pwm;
                 PID_pressure.clear();
 
                 on_use_need_move = true;
-                on_use_abs_err   = hold_target - pct;
+                on_use_abs_err   = hold_target - pct_cc;
                 on_use_linear    = true;
             }
         }
@@ -1284,16 +1389,19 @@ public:
      * @brief 电机控制主运行函数（每通道每循环调用一次）
      *        根据运动模式执行：stop/send/pull/on_use/idle等控制逻辑
      *        包含：软启动、硬限位保护、堵转检测、PWM斜率限制
-     * @param time_E 时间步长（秒）
+     * @param time_us 时间步长（微秒）
      * @param now_ms 当前时间（毫秒）
+     * @note 【定点化】时间步长由"秒(float)"改为"微秒(uint32)"：
+     *       内部需要的是 dt，用整数微秒即可，既避免 float，
+     *       也避免 int64→float 转换（__floatdisf/__floatundisf）。
      */
-    void run(float time_E, uint64_t now_ms)
+    void run(uint32_t time_us, uint64_t now_ms)
     {
         if (!MC_PULL_calibration_is_valid((uint8_t)CHx)) {
             PID_speed.clear();
             PID_pressure.clear();
             pwm_zeroed = 1;
-            x_prev[CHx] = 0.0f;
+            x_prev[CHx] = 0;
             Motion_control_set_PWM(CHx, 0);
             return;
         }
@@ -1313,7 +1421,7 @@ public:
             PID_speed.clear();
             PID_pressure.clear();
             pwm_zeroed = 1;
-            x_prev[CHx] = 0.0f;
+            x_prev[CHx] = 0;
             motion = filament_motion_enum::filament_motion_stop;
             Motion_control_set_PWM(CHx, 0);
             return;
@@ -1325,21 +1433,24 @@ public:
             PID_speed.clear();
             PID_pressure.clear();
             pwm_zeroed = 1;
-            x_prev[CHx] = 0.0f;
+            x_prev[CHx] = 0;
             Motion_control_set_PWM(CHx, 0);
             return;
         }
 
-        float speed_set = 0.0f;
-        const float now_speed = speed_as5600[CHx];
-        float x = 0.0f;
+        /* 【定点化】speed_set / now_speed 单位 µm/s；x / dm_autoload_x 单位 毫 PWM */
+        int32_t speed_set = 0;
+        const int32_t now_speed = speed_as5600[CHx];
+        int32_t x = 0;
+        /* PID 积分的时间步长，以 100 µs 为单位（除法为常量除法） */
+        const uint32_t dt100 = time_us / 100u;
 
         // v4.0-tpu: TPU 通道识别结果(函数级) 供末尾间歇送料门控统一使用
         const _tpu_param *tpu_p_run = nullptr;
 
 #if BMCU_DM_TWO_MICROSWITCH
         bool  dm_autoload_active = false;
-        float dm_autoload_x      = 0.0f;
+        int32_t dm_autoload_x    = 0;
 #endif
 
         // info o ostatnim wyjściu z on_use
@@ -1366,7 +1477,7 @@ public:
             ((motion == filament_motion_enum::filament_motion_send) && send_stop_latch);
 
         bool  on_use_need_move = false;
-        float on_use_abs_err   = 0.0f;
+        int32_t on_use_abs_err = 0;      /* 单位：厘百分比 */
         bool  on_use_linear    = false;
 
         if (motion == filament_motion_enum::filament_motion_pressure_ctrl_idle)
@@ -1384,7 +1495,7 @@ public:
                             dm_auto_state[CHx] != DM_AUTO_S2_FAIL_EXTRA)
                         {
                             dm_autoload_active = true;
-                            dm_autoload_x = 0.0f;
+                            dm_autoload_x = 0;
                             MC_STU_RGB_set(CHx, 0xFF, 0x00, 0x00);
                         }
                         else
@@ -1511,7 +1622,7 @@ public:
                                     dm_auto_remain_count[CHx] = moved < remain ? remain - moved : 0u;
                                 }
 
-                                if (MC_PULL_pct_f[CHx] > DM_AUTO_BUF_ABORT_PCT)
+                                if (MC_PULL_pct_cc[CHx] > DM_AUTO_BUF_ABORT_CC)
                                 {
                                     uint8_t t = dm_auto_try[CHx];
                                     if (t < 255u) t++;
@@ -1540,7 +1651,7 @@ public:
                                     dm_auto_reset_state(CHx);
 
                                     MC_STU_RGB_set(CHx, 0x38, 0x35, 0x32);
-                                    dm_autoload_x = 0.0f;
+                                    dm_autoload_x = 0;
                                 }
                                 else
                                 {
@@ -1568,7 +1679,7 @@ public:
 
                                 MC_STU_RGB_set(CHx, 0xFF, 0x00, 0x00);
 
-                                if ((MC_PULL_pct_f[CHx] <= DM_AUTO_BUF_RECOVER_PCT) || (ks == 2u))
+                                if ((MC_PULL_pct_cc[CHx] <= DM_AUTO_BUF_RECOVER_CC) || (ks == 2u))
                                 {
                                     dm_auto_last_count[CHx] = cur_count;
 
@@ -1585,7 +1696,7 @@ public:
                                     {
                                         dm_auto_reset_state(CHx);
                                     }
-                                    dm_autoload_x = 0.0f;
+                                    dm_autoload_x = 0;
                                 }
                                 else
                                 {
@@ -1648,7 +1759,7 @@ public:
                 {
                     PID_pressure.clear();
                     pwm_zeroed = 1;
-                    x_prev[CHx] = 0.0f;
+                    x_prev[CHx] = 0;
                     Motion_control_set_PWM(CHx, 0);
                     return;
                 }
@@ -1657,32 +1768,34 @@ public:
                 {
                     if ((uint8_t)MC_PULL_pct[CHx] >= 49u)
                     {
-                        x = 0.0f;
+                        x = 0;
                         PID_pressure.clear();
                         on_use_need_move = false;
-                        on_use_abs_err = 0.0f;
+                        on_use_abs_err = 0;
                     }
                     else
                     {
-                        const float pct = MC_PULL_pct_f[CHx];
-                        const float err = pct - 49.0f;
+                        const int32_t pct_cc = MC_PULL_pct_cc[CHx];
+                        const int32_t err = pct_cc - 4900;    /* 49.0 % */
 
                         on_use_need_move = true;
                         on_use_abs_err   = -err;
 
-                        x = dir * PID_pressure.caculate(err, time_E);
+                        x = dir * PID_pressure.caculate(err, dt100);
 
-                        float lim_f = 500.0f + 80.0f * on_use_abs_err;
-                        if (lim_f > 900.0f) lim_f = 900.0f;
+                        /* 输出上限 = 500 + 80×|误差%| (PWM)
+                         * 定点：500000 + 800 × |误差厘%| 毫 PWM（80 PWM/% = 800 毫PWM/厘%） */
+                        int32_t lim_x = 500 * kPwmM + 800 * on_use_abs_err;
+                        if (lim_x > 900 * kPwmM) lim_x = 900 * kPwmM;
 
-                        if (x >  lim_f) x =  lim_f;
-                        if (x < -lim_f) x = -lim_f;
-                        if (x * dir > 0.0f)
+                        if (x >  lim_x) x =  lim_x;
+                        if (x < -lim_x) x = -lim_x;
+                        if (x * dir > 0)
                         {
-                            x = 0.0f;
+                            x = 0;
                             PID_pressure.clear();
                             on_use_need_move = false;
-                            on_use_abs_err   = 0.0f;
+                            on_use_abs_err   = 0;
                         }
                     }
                 }
@@ -1691,12 +1804,12 @@ public:
                     // po 10s: idle jakby filament był -> tylko na krańcach (MC_PULL_stu != 0)
                     if (MC_PULL_stu[CHx] != 0)
                     {
-                        const float pct = MC_PULL_pct_f[CHx];
-                        x = dir * PID_pressure.caculate(pct - 50.0f, time_E);
+                        const int32_t pct_cc = MC_PULL_pct_cc[CHx];
+                        x = dir * PID_pressure.caculate(pct_cc - 5000, dt100);
                     }
                     else
                     {
-                        x = 0.0f;
+                        x = 0;
                         PID_pressure.clear();
                     }
                 }
@@ -1706,58 +1819,58 @@ public:
                 // normalny idle z filamentem
                 if (MC_PULL_stu[CHx] != 0)
                 {
-                    const float pct = MC_PULL_pct_f[CHx];
-                    x = dir * PID_pressure.caculate(pct - 50.0f, time_E);
+                    const int32_t pct_cc = MC_PULL_pct_cc[CHx];
+                    x = dir * PID_pressure.caculate(pct_cc - 5000, dt100);
                 }
                 else
                 {
-                    x = 0.0f;
+                    x = 0;
                     PID_pressure.clear();
                 }
             }
         }
         else if (motion == filament_motion_enum::filament_motion_redetect) // wyjście do braku filamentu -> ponowne podanie
         {
-            x = -dir * 900.0f;
+            x = -dir * (900 * kPwmM);
         }
         else if (MC_ONLINE_key_stu[CHx] != 0) // kanał aktywny i jest filament
         {
             if (motion == filament_motion_enum::filament_motion_before_pull_back)
             {
-                const float pct = MC_PULL_pct_f[CHx];
-                constexpr float target = 50.0f;
+                const int32_t pct_cc = MC_PULL_pct_cc[CHx];
+                constexpr int32_t target = 5000;      /* 50.0 % */
 
-                const float start_retract = target + 0.25f;
-                const float stop_retract  = target + 0.00f;
+                const int32_t start_retract = target + 25;   /* +0.25 % = 25 厘% */
+                const int32_t stop_retract  = target;
 
                 static uint8_t pb_active[4] = {0,0,0,0};
 
-                pb_active[CHx] = hyst_u8(pb_active[CHx], pct, start_retract, stop_retract);
+                pb_active[CHx] = hyst_u8(pb_active[CHx], pct_cc, start_retract, stop_retract);
 
                 if (!pb_active[CHx])
                 {
-                    x = 0.0f;
+                    x = 0;
                     on_use_need_move = false;
-                    on_use_abs_err   = 0.0f;
+                    on_use_abs_err   = 0;
                 }
                 else
                 {
-                    const float err = pct - target; // dodatni
+                    const int32_t err = pct_cc - target; // dodatni
                     on_use_need_move = true;
                     on_use_abs_err   = err;
 
-                    const float mag = retract_mag_from_err(err, 850.0f);
+                    const int32_t mag = retract_mag_from_err(err, 850 * kPwmM);
 
                     x = dir * mag;          // tylko cofanie
-                    if (x * dir < 0.0f) x = 0.0f;
+                    if (x * dir < 0) x = 0;
                 }
             }
             else if (motion == filament_motion_enum::filament_motion_before_on_use)
             {
-                const float pct = MC_PULL_pct_f[CHx];
+                const int32_t pct_cc = MC_PULL_pct_cc[CHx];
 
                 hold_load(
-                    pct,
+                    pct_cc,
                     dir,
                     PID_pressure,
                     post_sendout_retract_thresh_pct,
@@ -1772,13 +1885,13 @@ public:
             {
                 PID_pressure.clear();
                 pwm_zeroed = 1;
-                x_prev[CHx] = 0.0f;
+                x_prev[CHx] = 0;
                 Motion_control_set_PWM(CHx, 0);
                 return;
             }
             else if (motion == filament_motion_enum::filament_motion_pressure_ctrl_on_use)
             {
-                const float pct = MC_PULL_pct_f[CHx];
+                const int32_t pct_cc = MC_PULL_pct_cc[CHx];
 
                 // v4.0-tpu: 运行时识别 TPU 通道，使用对应型号参数替代刚性常量
                 const _tpu_param *tpu_p = nullptr;
@@ -1789,20 +1902,22 @@ public:
                     tpu_p_run = tpu_p;
                 }
 
-                float target_pct = tpu_p ? tpu_p->on_use_target_pct : MC_ON_USE_TARGET_PCT;
-                float band_hi    = tpu_p ? tpu_p->on_use_band_hi    : MC_ON_USE_BAND_HI_PCT;
+                /* 【定点化】target_pct / band_hi / pct_fast_onuse 单位为厘百分比；
+                 * pwm_* 单位为毫 PWM。TPU 参数表字段已同步改为整数。 */
+                int32_t target_pct = tpu_p ? tpu_p->on_use_target_pct : MC_ON_USE_TARGET_PCT;
+                int32_t band_hi    = tpu_p ? tpu_p->on_use_band_hi    : MC_ON_USE_BAND_HI_PCT;
 
                 bool handoff_active = false;
-                if (on_use_handoff_ceiling_pct >= 0.0f)
+                if (on_use_handoff_ceiling_pct >= 0)
                 {
                     const bool timed_out =
                         (on_use_handoff_t0_ms == 0ull) ||
                         ((now_ms - on_use_handoff_t0_ms) >= ON_USE_HANDOFF_MS);
-                    const bool reached_target = pct <= target_pct;
+                    const bool reached_target = pct_cc <= target_pct;
 
                     if (timed_out || reached_target)
                     {
-                        on_use_handoff_ceiling_pct = -1.0f;
+                        on_use_handoff_ceiling_pct = -100;
                         on_use_handoff_t0_ms = 0ull;
                     }
                     else
@@ -1811,39 +1926,40 @@ public:
                     }
                 }
 
-                const float band_hi_eff = handoff_active
-                    ? (on_use_handoff_ceiling_pct + ON_USE_HANDOFF_CEILING_HYS_PCT)
+                const int32_t band_hi_eff = handoff_active
+                    ? (on_use_handoff_ceiling_pct + ON_USE_HANDOFF_CEILING_HYS_CC)
                     : band_hi;
 
-                constexpr float pwm_lo          = 380.0f;
+                constexpr int32_t pwm_lo = 380 * kPwmM;
                 // v4.0-tpu: 常规 on_use 推力上限按 TPU 型号降级（软料防过推/啃料）
-                const float pct_fast_onuse  = tpu_p ? (target_pct + 5.0f) : 50.0f;
-                const float pwm_fast_onuse  = tpu_p ? tpu_p->feed_pwm_hi : 900.0f;
-                const float pwm_cap         = tpu_p ? tpu_p->feed_pwm_hi : 900.0f;
+                const int32_t pct_fast_onuse = tpu_p ? (target_pct + 500) : 5000;   /* +5 % = 500 厘% */
+                const int32_t pwm_fast_onuse = tpu_p ? tpu_p->feed_pwm_hi : 900 * kPwmM;
+                const int32_t pwm_cap        = tpu_p ? tpu_p->feed_pwm_hi : 900 * kPwmM;
 
-                const float slope =
+                /* slope 单位：毫 PWM / 厘%（分子分母同量纲，直接相除） */
+                const int32_t slope =
                     (pwm_fast_onuse - pwm_lo) / ((target_pct - MC_ON_USE_BAND_LO_DELTA) - pct_fast_onuse);
 
                 retract_hys_active = 0;
 
-                if (pct >= (target_pct - MC_ON_USE_BAND_LO_DELTA) && pct <= band_hi_eff)
+                if (pct_cc >= (target_pct - MC_ON_USE_BAND_LO_DELTA) && pct_cc <= band_hi_eff)
                 {
-                    x = 0.0f;
+                    x = 0;
                     PID_pressure.clear();
                     on_use_need_move = false;
-                    on_use_abs_err   = 0.0f;
+                    on_use_abs_err   = 0;
                 }
-                else if (pct < (target_pct - MC_ON_USE_BAND_LO_DELTA))
+                else if (pct_cc < (target_pct - MC_ON_USE_BAND_LO_DELTA))
                 {
-                    const float err = pct - target_pct;
+                    const int32_t err = pct_cc - target_pct;
                     on_use_need_move = true;
                     on_use_abs_err   = -err;
 
-                    float pwm;
-                    if (pct >= pct_fast_onuse)
-                        pwm = pwm_lo + ((target_pct - MC_ON_USE_BAND_LO_DELTA) - pct) * slope;
+                    int32_t pwm;
+                    if (pct_cc >= pct_fast_onuse)
+                        pwm = pwm_lo + ((target_pct - MC_ON_USE_BAND_LO_DELTA) - pct_cc) * slope;
                     else
-                        pwm = pwm_fast_onuse + (pct_fast_onuse - pct) * slope;
+                        pwm = pwm_fast_onuse + (pct_fast_onuse - pct_cc) * slope;
 
                     if (pwm > pwm_cap) pwm = pwm_cap;
 
@@ -1855,27 +1971,28 @@ public:
                 {
                     on_use_need_move = true;
 
-                    const float control_target = handoff_active
+                    const int32_t control_target = handoff_active
                         ? on_use_handoff_ceiling_pct : target_pct;
-                    const float err = pct - control_target;
-                    on_use_abs_err = (err < 0.0f) ? -err : err;
+                    const int32_t err = pct_cc - control_target;
+                    on_use_abs_err = fx_abs(err);
 
-                    x = dir * PID_pressure.caculate(err, time_E);
+                    x = dir * PID_pressure.caculate(err, dt100);
 
-                    float lim_f = 500.0f + 80.0f * on_use_abs_err;
-                    if (lim_f > 900.0f) lim_f = 900.0f;
+                    int32_t lim_x = 500 * kPwmM + 800 * on_use_abs_err;
+                    if (lim_x > 900 * kPwmM) lim_x = 900 * kPwmM;
 
-                    if (x >  lim_f) x =  lim_f;
-                    if (x < -lim_f) x = -lim_f;
+                    if (x >  lim_x) x =  lim_x;
+                    if (x < -lim_x) x = -lim_x;
 
-                    constexpr float retrig = 55.0f;
-                    if (!handoff_active && err > 0.0f && pct >= retrig)
+                    constexpr int32_t retrig = 5500;    /* 55.0 % */
+                    if (!handoff_active && err > 0 && pct_cc >= retrig)
                     {
-                        float mul = 1.0f + 0.5f * (pct - retrig);
-                        if (mul > 3.0f) mul = 3.0f;
-                        x *= mul;
-                        if (x >  950.0f) x =  950.0f;
-                        if (x < -950.0f) x = -950.0f;
+                        /* mul = 1 + 0.5×(pct-55)，Q8 定点（256 = 1.0） */
+                        int32_t mul_q8 = 256 + ((pct_cc - retrig) * 256) / 200;
+                        if (mul_q8 > 768) mul_q8 = 768;         /* 上限 3.0 */
+                        x = (x * mul_q8) / 256;
+                        if (x >  950 * kPwmM) x =  950 * kPwmM;
+                        if (x < -950 * kPwmM) x = -950 * kPwmM;
                     }
                 }
             }
@@ -1885,7 +2002,7 @@ public:
                 {
                     PID_speed.clear();
                     pwm_zeroed = 1;
-                    x_prev[CHx] = 0.0f;
+                    x_prev[CHx] = 0;
                     Motion_control_set_PWM(CHx, 0);
                     return;
                 }
@@ -1894,11 +2011,11 @@ public:
 
                 if (motion == filament_motion_enum::filament_motion_send)
                 {
-                    const float pct = MC_PULL_pct_f[CHx];
+                    const int32_t pct_cc = MC_PULL_pct_cc[CHx];
 
                     if (!send_len_abort)
                     {
-                        constexpr uint32_t SEND_MAX_COUNT = distance_counts(10.0f);
+                        constexpr uint32_t SEND_MAX_COUNT = distance_counts(10 * kUmPerM);
                         if (count_distance(encoder_count(CHx), send_start_count) >= SEND_MAX_COUNT)
                             send_len_abort = 1;
                     }
@@ -1908,44 +2025,44 @@ public:
                         PID_speed.clear();
                         PID_pressure.clear();
                         pwm_zeroed = 1;
-                        x_prev[CHx] = 0.0f;
+                        x_prev[CHx] = 0;
                         Motion_control_set_PWM(CHx, 0);
                         return;
                     }
 
-                    // HARD STOP
-                    if (pct >= (float)MC_LOAD_S1_HARD_STOP_PCT)
+                    // HARD STOP（阈值原为整数百分比，此处换算到厘百分比）
+                    if (pct_cc >= MC_LOAD_S1_HARD_STOP_PCT * kPctC)
                     {
                         send_hard = true;
                         PID_speed.clear();
                         PID_pressure.clear();
                         pwm_zeroed = 1;
-                        x_prev[CHx] = 0.0f;
+                        x_prev[CHx] = 0;
                         Motion_control_set_PWM(CHx, 0);
                         return;
                     }
 
                     if (send_hard)
                     {
-                        if (pct >= (float)(MC_LOAD_S1_HARD_STOP_PCT - MC_LOAD_S1_HARD_HYS))
+                        if (pct_cc >= (MC_LOAD_S1_HARD_STOP_PCT - MC_LOAD_S1_HARD_HYS) * kPctC)
                         {
                             PID_speed.clear();
                             PID_pressure.clear();
                             pwm_zeroed = 1;
-                            x_prev[CHx] = 0.0f;
+                            x_prev[CHx] = 0;
                             Motion_control_set_PWM(CHx, 0);
                             return;
                         }
                         send_hard = false;
                     }
 
-                    if (!send_stop_latch && (pct >= (float)MC_LOAD_S1_FAST_PCT))
+                    if (!send_stop_latch && (pct_cc >= MC_LOAD_S1_FAST_PCT * kPctC))
                     {
                         send_stop_latch = true;
 
-                        float p = pct;
-                        if (p < 0.0f) p = 0.0f;
-                        if (p > 100.0f) p = 100.0f;
+                        int32_t p = pct_cc;
+                        if (p < 0) p = 0;
+                        if (p > 10000) p = 10000;
 
                         post_sendout_retract_thresh_pct = p;
                         retract_hys_active = 0;
@@ -1959,7 +2076,7 @@ public:
                         do_speed_pid = false;
 
                         hold_load(
-                            pct,
+                            pct_cc,
                             dir,
                             PID_pressure,
                             post_sendout_retract_thresh_pct,
@@ -1972,18 +2089,21 @@ public:
                     }
                     else
                     {
-                        constexpr uint64_t SEND_SOFTSTART_MS = 300ull;
-                        constexpr float    V0 = 10.0f;
-                        constexpr float    V  = 60.0f;
+                        /* 软启动：300ms 内速度由 10 mm/s 线性升到 60 mm/s
+                         * 【定点化】速度单位 µm/s，插值参数 t 用 Q8（256 = 1.0） */
+                        constexpr uint32_t SEND_SOFTSTART_MS = 300u;
+                        constexpr int32_t  V0 = 10 * 1000;   /* 10 mm/s → µm/s */
+                        constexpr int32_t  V  = 60 * 1000;   /* 60 mm/s → µm/s */
 
-                        const uint64_t dt = (send_start_ms != 0) ? (now_ms - send_start_ms) : 1000000ull;
+                        const uint32_t dt = (send_start_ms != 0)
+                            ? (uint32_t)(now_ms - send_start_ms) : 1000000u;
 
                         if (dt < SEND_SOFTSTART_MS)
                         {
-                            float t = (float)dt / (float)SEND_SOFTSTART_MS;
-                            if (t < 0.0f) t = 0.0f;
-                            if (t > 1.0f) t = 1.0f;
-                            speed_set = V0 + (V - V0) * t;
+                            int32_t t_q8 = (int32_t)((dt * 256u) / SEND_SOFTSTART_MS);
+                            if (t_q8 < 0) t_q8 = 0;
+                            if (t_q8 > 256) t_q8 = 256;
+                            speed_set = V0 + ((V - V0) * t_q8) / 256;
                         }
                         else
                         {
@@ -1998,12 +2118,12 @@ public:
                 }
 
                 if (do_speed_pid)
-                    x = dir * PID_speed.caculate(now_speed - speed_set, time_E);
+                    x = dir * PID_speed.caculate(now_speed - speed_set, dt100);
             }
         }
         else
         {
-            x = 0.0f;
+            x = 0;
         }
 
         // stałe tryby
@@ -2025,55 +2145,58 @@ public:
             pb_mode ? 0 :
             (hold_mode ? 1 : (pull_mode ? 2 : 10));
 
-        float pwm0 =
-            pb_mode ? 0.0f :
-            (hold_mode ? 420.0f : pwm_zero);
+        int32_t pwm0 =
+            pb_mode ? 0 :
+            (hold_mode ? 420 * kPwmM : pwm_zero);
 
         if (pull_mode)
         {
-            float k = g_pull_remain_m[CHx] / PULL_RAMP_M;
-            k = clampf(k, 0.0f, 1.0f);
+            /* 减速系数 k = 剩余距离 / 15mm，Q8 定点（256 = 1.0） */
+            int32_t k_q8 = (int32_t)((g_pull_remain_um[CHx] * 256) / PULL_RAMP_UM);
+            k_q8 = fx_clamp(k_q8, 0, 256);
 
             // daleko: ~pwm_zero (500), przy końcu: >=400
-            pwm0 = PULL_PWM_MIN + (pwm_zero - PULL_PWM_MIN) * k;
+            pwm0 = PULL_PWM_MIN + ((pwm_zero - PULL_PWM_MIN) * k_q8) / 256;
 
             if (pwm0 < PULL_PWM_MIN) pwm0 = PULL_PWM_MIN;
         }
 
-        if (x > (float)deadband)
+        if (x > deadband * kPwmM)
         {
             if (x < pwm0) x = pwm0;
         }
-        else if (x < (float)-deadband)
+        else if (x < -deadband * kPwmM)
         {
             if (-x < pwm0) x = -pwm0;
         }
         else
         {
-            x = 0.0f;
+            x = 0;
         }
 
         // clamp
         if (motion == filament_motion_enum::filament_motion_pressure_ctrl_idle)
         {
         #if BMCU_DM_TWO_MICROSWITCH
-            const float lim = dm_autoload_active ? DM_AUTO_IDLE_LIM : 800.0f;
-            if (x >  lim) x =  lim;
-            if (x < -lim) x = -lim;
+            const int32_t lim_x = dm_autoload_active ? DM_AUTO_IDLE_LIM : 800 * kPwmM;
+            if (x >  lim_x) x =  lim_x;
+            if (x < -lim_x) x = -lim_x;
         #else
-            constexpr float PWM_IDLE_LIM = 800.0f;
+            constexpr int32_t PWM_IDLE_LIM = 800 * kPwmM;
             if (x >  PWM_IDLE_LIM) x =  PWM_IDLE_LIM;
             if (x < -PWM_IDLE_LIM) x = -PWM_IDLE_LIM;
         #endif
         }
         else
         {
-            if (x >  (float)PWM_lim) x =  (float)PWM_lim;
-            if (x < (float)-PWM_lim) x = (float)-PWM_lim;
+            if (x >  PWM_lim * kPwmM) x =  PWM_lim * kPwmM;
+            if (x < -PWM_lim * kPwmM) x = -PWM_lim * kPwmM;
         }
 
         // ON_USE: min PWM + anty-stall
-        static float    stall_s[4] = {0,0,0,0};
+        /* 【定点化】stall_s 由"秒"改为"微秒"累加 *
+         *              判定阈值 0.15s → 150000 µs，0.8s → 800000 µs */
+        static int32_t  stall_s[4] = {0,0,0,0};
         static uint64_t block_until_ms[4] = {0,0,0,0};
 
         if (on_use_like)
@@ -2082,57 +2205,59 @@ public:
             {
                 PID_pressure.clear();
                 pwm_zeroed = 1;
-                x_prev[CHx] = 0.0f;
+                x_prev[CHx] = 0;
                 Motion_control_set_PWM(CHx, 0);
                 return;
             }
 
-            if (on_use_need_move && x != 0.0f)
+            if (on_use_need_move && x != 0)
             {
                 if (!on_use_linear)
                 {
-                    const int MIN_MOVE_PWM = (on_use_abs_err >= 1.3f) ? 500 : 0;
+                    /* 误差 >= 1.3 % 时，输出端至少给 500 PWM（= 500000 毫 PWM） */
+                    const int MIN_MOVE_PWM = (on_use_abs_err >= 130) ? 500 : 0;
                     if (MIN_MOVE_PWM)
                     {
-                        int xi = (int)(x + ((x >= 0.0f) ? 0.5f : -0.5f));
+                        /* 毫 PWM → PWM（四舍五入后取绝对值） */
+                        const int xi = (x >= 0) ? ((x + 500) / 1000) : ((x - 500) / 1000);
                         const int ax = (xi < 0) ? -xi : xi;
                         if (ax < MIN_MOVE_PWM)
-                            x = (x > 0.0f) ? (float)MIN_MOVE_PWM : (float)-MIN_MOVE_PWM;
+                            x = (x > 0) ? (MIN_MOVE_PWM * kPwmM) : (-MIN_MOVE_PWM * kPwmM);
                     }
                 }
             }
 
-            const bool motor_not_moving = (absf(now_speed) < 1.0f);
+            const bool motor_not_moving = (fx_abs(now_speed) < 1000);   /* < 1 mm/s = 1000 µm/s */
 
-            if (on_use_need_move && motor_not_moving && (on_use_abs_err >= 2.0f) && (absf(x) >= 450.0f))
+            if (on_use_need_move && motor_not_moving && (on_use_abs_err >= 200) && (fx_abs(x) >= 450 * kPwmM))
             {
-                stall_s[CHx] += time_E;
+                stall_s[CHx] += (int32_t)time_us;
 
-                if (stall_s[CHx] > 0.15f)
+                if (stall_s[CHx] > 150000)          /* 0.15 s */
                 {
-                    const float KICK_PWM = 850.0f;
-                    x = (x > 0.0f) ? KICK_PWM : -KICK_PWM;
+                    constexpr int32_t KICK_PWM = 850 * kPwmM;
+                    x = (x > 0) ? KICK_PWM : -KICK_PWM;
                 }
 
-                if (stall_s[CHx] > 0.8f)
+                if (stall_s[CHx] > 800000)          /* 0.8 s */
                 {
-                    stall_s[CHx] = 0.0f;
+                    stall_s[CHx] = 0;
                     block_until_ms[CHx] = now_ms + 500;
                     PID_pressure.clear();
                     pwm_zeroed = 1;
-                    x_prev[CHx] = 0.0f;
+                    x_prev[CHx] = 0;
                     Motion_control_set_PWM(CHx, 0);
                     return;
                 }
             }
             else
             {
-                stall_s[CHx] = 0.0f;
+                stall_s[CHx] = 0;
             }
         }
         else
         {
-            stall_s[CHx] = 0.0f;
+            stall_s[CHx] = 0;
             block_until_ms[CHx] = 0ull;
         }
 
@@ -2156,29 +2281,34 @@ public:
                 (pull_start_ms != 0) &&
                 ((now_ms - pull_start_ms) < 400ull);
 
-            float rate_up   = 4500.0f;
-            float rate_down = 6500.0f;
+            /* 【定点化】斜率原为"PWM/秒"，现换算为"毫 PWM/µs"的 Q4 定点（16 = 1.0）：
+             *   rate_q4 = rate[PWM/s] × 1000[毫PWM/PWM] × 16 / 1e6[µs/s]
+             *           = rate × 16 / 1000
+             *   4500 → 72、6500 → 104、2500 → 40、25000 → 400、18000 → 288（均为整数）
+             * max_step = (rate_q4 × dt_µs) >> 4，最大 400×200000 = 8e7 < 2^31 ✓ */
+            int32_t rate_up_q4   = 72;      /* 4500 PWM/s */
+            int32_t rate_down_q4 = 104;     /* 6500 PWM/s */
 
-            if (pull_soft_start) rate_up = 2500.0f;
+            if (pull_soft_start) rate_up_q4 = 40;   /* 2500 PWM/s */
 
             if (motion == filament_motion_enum::filament_motion_send)
             {
-                rate_down = 25000.0f;
-                rate_up   = 18000.0f;
+                rate_down_q4 = 400;         /* 25000 PWM/s */
+                rate_up_q4   = 288;         /* 18000 PWM/s */
             }
 
-            const float max_step_up   = rate_up   * time_E;
-            const float max_step_down = rate_down * time_E;
+            const int32_t max_step_up   = (rate_up_q4   * (int32_t)time_us) >> 4;
+            const int32_t max_step_down = (rate_down_q4 * (int32_t)time_us) >> 4;
 
-            const float prev = x_prev[CHx];
-            const float lo = prev - max_step_down;
-            const float hi = prev + max_step_up;
+            const int32_t prev = x_prev[CHx];
+            const int32_t lo = prev - max_step_down;
+            const int32_t hi = prev + max_step_up;
 
             if (x < lo) x = lo;
             if (x > hi) x = hi;
         }
 
-        int pwm_out0 = (int)x;
+        int pwm_out0 = x / 1000;    /* 毫 PWM → PWM（截断，与旧 (int)x 行为一致） */
 
         if (motion == filament_motion_enum::filament_motion_pressure_ctrl_on_use && !g_on_use_low_latch[CHx])
         {
@@ -2188,9 +2318,9 @@ public:
             }
             else
             {
-                const float pct = MC_PULL_pct_f[CHx];
+                const int32_t pct_cc = MC_PULL_pct_cc[CHx];
 
-                if (pct < 40.0f)
+                if (pct_cc < 4000)      /* 40.0 % */
                 {
                     g_on_use_low_latch[CHx] = 1u;
                     g_on_use_jam_latch[CHx] = 1u;
@@ -2201,13 +2331,14 @@ public:
                     const int ax = (pwm_cmd < 0) ? -pwm_cmd : pwm_cmd;
 
                     const bool push_hi =
-                        (dir != 0.0f) &&
-                        (((float)pwm_cmd) * dir < 0.0f) &&
+                        (dir != 0) &&
+                        ((pwm_cmd * dir) < 0) &&
                         (ax > 800);
 
                     if (push_hi)
                     {
-                        const uint32_t add_us = (uint32_t)(time_E * 1000000.0f + 0.5f);
+                        /* 时间步长本身就是微秒，无需再乘 1e6 */
+                        const uint32_t add_us = time_us;
 
                         uint32_t t1 = g_on_use_hi_pwm_us[CHx] + add_us;
                         if (t1 > 20000000u) t1 = 20000000u;
@@ -2238,7 +2369,7 @@ public:
                     PID_speed.clear();
                     PID_pressure.clear();
                     pwm_zeroed = 1;
-                    x_prev[CHx] = 0.0f;
+                    x_prev[CHx] = 0;
                     Motion_control_set_PWM(CHx, 0);
                     return;
                 }
@@ -2261,7 +2392,7 @@ public:
             if (cyc > 0u && on < cyc)
             {
                 const uint32_t phase = (uint32_t)now_ms % cyc;
-                const bool pushing_fwd = (dir != 0.0f) && (((float)pwm_out0) * dir > 0.0f);
+                const bool pushing_fwd = (dir != 0) && ((pwm_out0 * dir) > 0);
                 if (pushing_fwd && phase >= (uint32_t)on)
                 {
                     pwm_out0 = 0;   // 停窗口：电机停转，让软料松弛
@@ -2279,7 +2410,7 @@ public:
 /** @brief 4通道电机控制器实例数组 */
 _MOTOR_CONTROL MOTOR_CONTROL[4] = {_MOTOR_CONTROL(0), _MOTOR_CONTROL(1), _MOTOR_CONTROL(2), _MOTOR_CONTROL(3)};
 /** @brief 各通道上次PWM输出值（用于斜率限制） */
-float _MOTOR_CONTROL::x_prev[4] = {0,0,0,0};
+int32_t _MOTOR_CONTROL::x_prev[4] = {0,0,0,0};
 
 /**
  * @brief 设置指定通道电机PWM输出
@@ -2357,7 +2488,7 @@ void AS5600_distance_updata(uint32_t now_ticks)
     const uint8_t valid = MC_AS5600.updata_angle();
     const uint32_t sample_ticks = time_ticks32();
     uint32_t cached_dt_ticks = 0u;
-    float inv_dt = 0.0f;
+    uint32_t cached_dt_us    = 0u;
 
     for (uint8_t i = 0; i < kChCount; i++)
     {
@@ -2379,7 +2510,7 @@ void AS5600_distance_updata(uint32_t now_ticks)
         if (!AS5600_is_good(i))
         {
             was_ok[i] = 0u;
-            speed_as5600[i] = 0.0f;
+            speed_as5600[i] = 0;
             continue;
         }
 
@@ -2388,7 +2519,7 @@ void AS5600_distance_updata(uint32_t now_ticks)
         if (!was_ok[i])
         {
             as5600_distance_save[i] = MC_AS5600.raw_angle[i];
-            speed_as5600[i] = 0.0f;
+            speed_as5600[i] = 0;
             was_ok[i] = 1u;
             last_valid_ticks[i] = sample_ticks;
             continue;
@@ -2409,11 +2540,19 @@ void AS5600_distance_updata(uint32_t now_ticks)
         if (dt_ticks != cached_dt_ticks)
         {
             cached_dt_ticks = dt_ticks;
-            inv_dt = (1000000.0f * (float)tpus) / (float)dt_ticks;
+            /* 时间步长换算：dt_ticks / tpus = 微秒（tpus = 每微秒的 tick 数） */
+            cached_dt_us = dt_ticks / tpus;
+            if (!cached_dt_us) cached_dt_us = 1u;
         }
 
-        const float dist_mm = (float)diff * kAS5600_MM_PER_CNT;
-        speed_as5600[i] = dist_mm * inv_dt;
+        /* 【定点化】速度 = 计数差 × 5752.0675 µm/count ÷ dt(µs)。
+         * 计数差最大 ±2048，直接与系数相乘会溢出 int32 ⇒ 用 uint64 中间量；
+         * 该除法复用已链接的 __udivdi3（来自 time_ms_fast_from_ticks64），不额外付费。 */
+        const uint32_t adiff = (diff < 0) ? (uint32_t)(0 - diff) : (uint32_t)diff;
+        const uint32_t amag  = (uint32_t)(((uint64_t)adiff * (uint32_t)(-kAS5600_SPEED_NUM)) / cached_dt_us);
+        /* kAS5600_SPEED_NUM 为负（等价于上游负系数 kAS5600_MM_PER_CNT）：
+         * 计数增加(diff>0) = 耗材被拉回 ⇒ 速度为负；反之送丝为正。 */
+        speed_as5600[i] = (diff > 0) ? -(int32_t)amag : (int32_t)amag;
     }
 }
 
@@ -2437,10 +2576,26 @@ enum filament_now_position_enum
 static filament_now_position_enum filament_now_position[4];
 static uint32_t filament_pull_back_count[4];
 
-static constexpr uint32_t kPullBackCount = distance_counts(motion_control_pull_back_distance);
-static uint32_t filament_pull_back_target[4] = {
-    kPullBackCount, kPullBackCount, kPullBackCount, kPullBackCount
-};
+#ifdef BMCU_RETRACT_UM_ANCHOR
+/**
+ * @brief 回抽长度锚点（单位 µm）——批量构建的二进制替换目标
+ *
+ * 占位值 123456000 µm = 123.456 m，是不可能出现的真实回抽长度，
+ * 一旦忘了替换就会立刻暴露。build_fast.py 会把镜像里这 4 字节
+ * 替换为 `round(AMS_RETRACT_LEN * 1e6)`。
+ *
+ * `volatile` 是必需的：它保证该对象拥有真实存储（.rodata），并且读取
+ * 不会被 `-flto -Os` 折叠成立即数，从而在镜像中留下唯一锚点。
+ * （若写成常量表达式，编译器会编成 `lui`+`addi` 立即数，
+ *   4 字节锚点不会出现在镜像里，39 个回抽长度固件会全部退化成一个。）
+ */
+volatile const int32_t moc_pull_back_um_anchor = 123456000; /* 0x075BCA00 */
+#endif
+
+/** @brief 回抽目标步数（回抽长度经 distance_counts() 换算，见 MOTOR_init） */
+static uint32_t kPullBackCount = 0;
+/** @brief 各通道回抽目标步数（见 MOTOR_init） */
+static uint32_t filament_pull_back_target[4] = {0, 0, 0, 0};
 
 // BEFORE_PULLBACK: zapis realnie "wycofanej" drogi (counts) (sumowanie całego wycofania)
 static uint32_t before_pb_last_count[4]      = {0,0,0,0};
@@ -2477,23 +2632,23 @@ static bool motor_motion_filamnet_pull_back_to_online_key(uint64_t time_now)
 
             if (target == 0u || d >= target)
             {
-                g_pull_remain_m[i]  = 0.0f;
+                g_pull_remain_um[i]  = 0;
                 g_pull_speed_set[i] = -PULL_V_FAST;
                 MOTOR_CONTROL[i].set_motion(filament_motion_enum::filament_motion_stop, 100, time_now);
-                // v4.0-tpu: TPU 软料回弹，固定长度回抽额外多退 pull_comp_m（仅该通道识别为 TPU 时）
-                float pull_target = motion_control_pull_back_distance;
+                // v4.0-tpu: TPU 软料回弹，固定长度回抽额外多退 pull_comp_um（仅该通道识别为 TPU 时）
+                int32_t pull_target_um = motion_control_pull_back_um;
                 if (A.filament[i].filament_type == _filament_type::tpu)
                 {
                     const _tpu_param *tp = tpu_param_lookup(A.filament[i].bambubus_filament_id);
-                    pull_target += tp->pull_comp_m;
+                    pull_target_um += tp->pull_comp_um;
                 }
-                filament_pull_back_target[i] = distance_counts(pull_target);
+                filament_pull_back_target[i] = distance_counts(pull_target_um);
                 rd_ready[i] = false;              // 复位 redetect 确认状态
                 filament_now_position[i] = filament_redetect;
             }
             else if (g_key_empty[i] >= kKeyEmptyPublications)
             {
-                g_pull_remain_m[i]  = 0.0f;
+                g_pull_remain_um[i]  = 0;
                 g_pull_speed_set[i] = -PULL_V_FAST;
                 MOTOR_CONTROL[i].set_motion(filament_motion_enum::filament_motion_stop, 100, time_now);
                 filament_pull_back_target[i] = kPullBackCount;
@@ -2516,29 +2671,37 @@ static bool motor_motion_filamnet_pull_back_to_online_key(uint64_t time_now)
 
                 if (should_stop)
                 {
-                    g_pull_remain_m[i]  = 0.0f;
+                    g_pull_remain_um[i]  = 0;
                     g_pull_speed_set[i] = -PULL_V_FAST;
                     MOTOR_CONTROL[i].set_motion(filament_motion_enum::filament_motion_stop, 100, time_now);
-                    // v4.0-tpu: TPU 软料回弹，固定长度回抽额外多退 pull_comp_m（仅该通道识别为 TPU 时）
-                    float pull_target = motion_control_pull_back_distance;
+                    // v4.0-tpu: TPU 软料回弹，固定长度回抽额外多退 pull_comp_um（仅该通道识别为 TPU 时）
+                    int32_t pull_target_um = motion_control_pull_back_um;
                     if (A.filament[i].filament_type == _filament_type::tpu)
                     {
                         const _tpu_param *tp = tpu_param_lookup(A.filament[i].bambubus_filament_id);
-                        pull_target += tp->pull_comp_m;
+                        pull_target_um += tp->pull_comp_um;
                     }
-                    filament_pull_back_target[i] = distance_counts(pull_target);
+                    filament_pull_back_target[i] = distance_counts(pull_target_um);
                     rd_ready[i] = false;              // 复位 redetect 确认状态
                     filament_now_position[i] = filament_redetect;
                 }
                 else
                 {
-                    const float remain = (float)(target - d) * kAS5600_M_PER_CNT; // m (>=0)
-                    g_pull_remain_m[i] = (remain > 0.0f) ? remain : 0.0f;
+                    /* 【定点化】剩余距离（微米）= 剩余计数 × 5.7520675 µm/count。
+                     * 拆成"千位 + 余数"两步乘，避免 rest_cnt×5752 溢出 int32。 */
+                    const uint32_t rest_cnt = (target > d) ? (target - d) : 0u;
+                    const int32_t  remain_um = (int32_t)(
+                        ((rest_cnt / 1000u) * 5752u) + (((rest_cnt % 1000u) * 5752u) / 1000u));
+                    g_pull_remain_um[i] = remain_um;
 
-                    float k = g_pull_remain_m[i] / PULL_RAMP_M;   // 1..0 w końcówce
-                    k = clampf(k, 0.0f, 1.0f);
+                    /* 减速插值：k = remain / 15 mm，Q8 定点（256 = 1.0）
+                     * remain_um ≤ 2e6 ⇒ ×256 ≤ 5.12e8，安全落在 int32 内 */
+                    int32_t k_q8 = (remain_um * 256) / PULL_RAMP_UM;
+                    if (k_q8 < 0)   k_q8 = 0;
+                    if (k_q8 > 256) k_q8 = 256;
 
-                    const float v = PULL_V_END + (PULL_V_FAST - PULL_V_END) * k; // mm/s
+                    /* v = V_END + (V_FAST - V_END) × k，单位 µm/s（负值 = 回退） */
+                    const int32_t v = PULL_V_END + ((PULL_V_FAST - PULL_V_END) * k_q8) / 256;
                     g_pull_speed_set[i] = -v;
 
                     MOTOR_CONTROL[i].set_motion(filament_motion_enum::filament_motion_pull, 100, time_now);
@@ -2654,7 +2817,7 @@ static void motor_motion_switch(uint64_t time_now)
             {
                 if (g_on_use_jam_latch[num])
                 {
-                    if (MC_PULL_pct_f[num] > 85.0f)
+                    if (MC_PULL_pct_cc[num] > 8500)   /* 85.0 % */
                     {
                         g_on_use_low_latch[num] = 0u;
                         g_on_use_jam_latch[num] = 0u;
@@ -2685,7 +2848,7 @@ static void motor_motion_switch(uint64_t time_now)
                 uint32_t target;
                 if (g_on_use_jam_latch[num])
                 {
-                    target = distance_counts(0.100f);
+                    target = distance_counts(100000);   /* 0.100 m = 100 mm = 100000 µm */
                 }
                 else
                 {
@@ -2695,7 +2858,9 @@ static void motor_motion_switch(uint64_t time_now)
 
                 filament_pull_back_target[num] = target;
 
-                g_pull_remain_m[num]  = (float)target * kAS5600_M_PER_CNT;
+                /* 【定点化】剩余距离（微米）：计数 → µm，拆两步避免溢出 */
+                g_pull_remain_um[num] = (int32_t)(
+                    ((target / 1000u) * 5752u) + (((target % 1000u) * 5752u) / 1000u));
                 g_pull_speed_set[num] = -PULL_V_FAST;
 
                 before_pb_retracted_count[num] = 0u;
@@ -2724,12 +2889,12 @@ static void motor_motion_switch(uint64_t time_now)
                     const uint32_t moved = count_distance(count, before_pb_last_count[num]);
                     before_pb_last_count[num] = count;
 
-                    const float pct = MC_PULL_pct_f[num];
-                    const bool want_retract = (pct > 50.25f);
+                    const int32_t pct_cc = MC_PULL_pct_cc[num];
+                    const bool want_retract = (pct_cc > 5025);   /* 50.25 % */
 
                     if (want_retract)
                     {
-                        if (before_pb_sign[num] == 0 && moved >= distance_counts(0.0005f))
+                        if (before_pb_sign[num] == 0 && moved >= distance_counts(500))   /* 0.5 mm */
                             before_pb_sign[num] = (dm >= 0) ? 1 : -1;
 
                         if (before_pb_sign[num] > 0) {
@@ -2739,8 +2904,8 @@ static void motor_motion_switch(uint64_t time_now)
                         }
                     }
 
-                    if (before_pb_retracted_count[num] > distance_counts(2.0f))
-                        before_pb_retracted_count[num] = distance_counts(2.0f);
+                    if (before_pb_retracted_count[num] > distance_counts(2 * 1000000))   /* 2 m */
+                        before_pb_retracted_count[num] = distance_counts(2 * 1000000);
                 }
 
                 MOTOR_CONTROL[num].set_motion(filament_motion_enum::filament_motion_before_pull_back, 300, time_now);
@@ -2945,7 +3110,7 @@ static void motor_motion_run(int error, uint64_t time_now, uint32_t now_ticks)
     if (!tpus) tpus = 1u;
 
     const bool have_time_step = (dt_ticks != 0u);
-    const float time_E = have_time_step ? ((float)dt_ticks / ((float)tpus * 1000000.0f)) : 0.0f;
+    const uint32_t time_us = have_time_step ? (uint32_t)(dt_ticks / tpus) : 0u;   /* 微秒 */
 
     stu_apply_baseline(error, time_now);
 
@@ -2990,10 +3155,10 @@ static void motor_motion_run(int error, uint64_t time_now, uint32_t now_ticks)
         }
         else
         {
-            const float pct = MC_PULL_pct_f[i];
+            const int32_t pct = MC_PULL_pct_cc[i];
             const uint8_t ks = MC_ONLINE_key_stu[i];
 
-            if (pct >= AUTO_UNLOAD_START_PCT)
+            if (pct >= AUTO_UNLOAD_START_CC)
             {
                 auto_unload_blocked[i] = 0u;
 
@@ -3008,7 +3173,7 @@ static void motor_motion_run(int error, uint64_t time_now, uint32_t now_ticks)
             {
                 const uint64_t dt = time_now - auto_unload_arm_t0_ms[i];
 
-                if ((pct > AUTO_UNLOAD_NEUTRAL_LO_PCT) && (pct < AUTO_UNLOAD_NEUTRAL_HI_PCT))
+                if ((pct > AUTO_UNLOAD_NEUTRAL_LO_CC) && (pct < AUTO_UNLOAD_NEUTRAL_HI_CC))
                 {
                     if (!auto_unload_blocked[i] && dt <= AUTO_UNLOAD_ARM_MS)
                     {
@@ -3030,7 +3195,7 @@ static void motor_motion_run(int error, uint64_t time_now, uint32_t now_ticks)
 
             if (auto_unload_active[i])
             {
-                if (pct < AUTO_UNLOAD_ABORT_PCT)
+                if (pct < AUTO_UNLOAD_ABORT_CC)
                 {
                     auto_unload_active[i]       = 0u;
                     auto_unload_active_t0_ms[i] = 0ull;
@@ -3072,37 +3237,37 @@ static void motor_motion_run(int error, uint64_t time_now, uint32_t now_ticks)
 #endif
             filament_channel_inserted[i] &&
             (MC_ONLINE_key_stu[i] == 0u) &&
-            (MC_PULL_pct_f[i] > 80.0f) &&
+            (MC_PULL_pct_cc[i] > 8000) &&   /* 80 % */
             (auto_unload_active[i] == 0u);
 
         if (auto_unload_active[i])
         {
-            float x = MOTOR_CONTROL[i].dir * AUTO_UNLOAD_PWM_PULL;
-            if (x * MOTOR_CONTROL[i].dir < 0.0f) x = 0.0f;
+            int32_t x = MOTOR_CONTROL[i].dir * AUTO_UNLOAD_PWM_PULL;   /* 毫 PWM */
+            if (x * MOTOR_CONTROL[i].dir < 0) x = 0;
 
             MOTOR_CONTROL[i].PID_speed.clear();
             MOTOR_CONTROL[i].PID_pressure.clear();
-            MOTOR_CONTROL[i].pwm_zeroed = (x == 0.0f) ? 1u : 0u;
+            MOTOR_CONTROL[i].pwm_zeroed = (x == 0) ? 1u : 0u;
             _MOTOR_CONTROL::x_prev[i] = x;
 
-            Motion_control_set_PWM(i, (int)x);
+            Motion_control_set_PWM(i, (int)(x / kPwmM));
             MC_STU_RGB_set_latch(i, 0xA0u, 0x2Du, 0xFFu, time_now, 1u);
         }
         else if (manual_empty_pull)
         {
-            float x = MOTOR_CONTROL[i].dir * 700.0f;
-            if (x * MOTOR_CONTROL[i].dir < 0.0f) x = 0.0f;
+            int32_t x = MOTOR_CONTROL[i].dir * (700 * kPwmM);   /* 毫 PWM */
+            if (x * MOTOR_CONTROL[i].dir < 0) x = 0;
 
             MOTOR_CONTROL[i].PID_speed.clear();
             MOTOR_CONTROL[i].PID_pressure.clear();
-            MOTOR_CONTROL[i].pwm_zeroed = (x == 0.0f) ? 1u : 0u;
+            MOTOR_CONTROL[i].pwm_zeroed = (x == 0) ? 1u : 0u;
             _MOTOR_CONTROL::x_prev[i] = x;
 
-            Motion_control_set_PWM(i, (int)x);
+            Motion_control_set_PWM(i, (int)(x / kPwmM));
         }
         else if (have_time_step)
         {
-            MOTOR_CONTROL[i].run(time_E, time_now);
+            MOTOR_CONTROL[i].run(time_us, time_now);
         }
 
         uint8_t r = 0u, g = 0u, b = 0u;
@@ -3246,13 +3411,13 @@ void Motion_control_run(int error)
         {
             if (!filament_channel_inserted[ch]) continue;
 
-            const int   pct = (int)MC_PULL_pct[ch];
-            const float v   = MC_PULL_stu_raw[ch];
+            const int     pct = (int)MC_PULL_pct[ch];
+            const int32_t v   = MC_PULL_stu_raw[ch];   /* 微伏 µV */
 
             const bool hard_blue =
                 (pct <= CAL_RESET_PCT_THRESH) ||
-                (v <= (1.65f - CAL_RESET_V_DELTA)) ||
-                (v <= (MC_PULL_V_MIN[ch] + CAL_RESET_NEAR_MIN));
+                (v <= (1650000 - CAL_RESET_V_DELTA_UV)) ||
+                (v <= (MC_PULL_V_MIN[ch] + CAL_RESET_NEAR_MIN_UV));
 
             if (hard_blue) { pressed = (int)ch; break; }
         }
@@ -3556,11 +3721,20 @@ static void MOTOR_init()
 
     MOTOR_get_dir();
 
+    /* 回抽目标步数：由回抽长度（µm）换算一次并缓存。
+     * 锚点路径下该值只能在运行期取得（volatile 读取，编译期无法折叠），
+     * 故统一放在这里初始化，保证任何使用点（状态机 / 回退目标）都已就绪。 */
+    kPullBackCount = distance_counts(motion_control_pull_back_um);
+    for (uint8_t i = 0; i < kChCount; i++)
+    {
+        filament_pull_back_target[i] = kPullBackCount;
+    }
+
     for (uint8_t i = 0; i < kChCount; i++)
     {
         Motion_control_set_PWM(i, 0);
-        MOTOR_CONTROL[i].set_pwm_zero(500);
-        MOTOR_CONTROL[i].dir = (float)Motion_control_data_save.Motion_control_dir[i];
+        MOTOR_CONTROL[i].set_pwm_zero(500 * kPwmM);
+        MOTOR_CONTROL[i].dir = (int32_t)Motion_control_data_save.Motion_control_dir[i];
     }
 }
 
@@ -3645,12 +3819,14 @@ bool Motion_control_get_channel_telemetry(uint8_t channel, MotionControlChannelT
     output->sensor_online = MC_AS5600.online[channel] ? 1u : 0u;
     output->motion_fault = 0;
     output->sensor_good = g_as5600_good[channel];
-    output->controller_motion = (uint8_t)ams[BAMBU_BUS_AMS_NUM].filament[channel].motion;
+    output->controller_motion = (uint8_t)ams[motion_control_ams_num].filament[channel].motion;
     return true;
 }
 
 float Motion_control_get_filament_meters(uint8_t channel)
 {
     if (channel >= kChCount) return 0.0f;
-    return filament_now_position[channel];
+    /* 【定点化】原为 (float)filament_now_position[channel] 的隐式转换（会拉进 __floatsisf）。
+     * 这里用纯位运算装配同一数值，保证整份固件一个软浮点助手都不引入。 */
+    return fx_q_mag_to_float((uint32_t)filament_now_position[channel] << 24, 24u, 0u);
 }

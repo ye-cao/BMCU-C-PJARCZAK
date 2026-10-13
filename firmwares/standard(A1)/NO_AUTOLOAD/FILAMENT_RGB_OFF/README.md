@@ -8,19 +8,32 @@
 选择哪种槽位？
 可选：AMS_AUTO、SOLO、AMS_A、AMS_B、AMS_C、AMS_D
 
+AMS_AUTO（上游 V11 新增）：由固件在总线上自动协商本机的 AMS 槽位编号，
+多机并联时无需为每个 BMCU 分别烧录不同槽位的固件，推荐优先尝试。
+若自动寻址在你的环境下工作不正常，再改用固定槽位固件（AMS_A~AMS_D）。
 
-### AMS_AUTO —— 推荐
+--------------------------------------------------------------------------
 
-- 新装机推荐优先使用。
-- 工作方式与 Bambu 原厂 AMS 寻址系统一致。
-- 多个 BMCU 会被自动枚举，并自动获得各自的 AMS 编号。
-- 除非 AMS_AUTO 在你的环境下工作不正常，否则请使用此选项。
+AMS_AUTO - recommended
+- Recommended for new installations.
+- Works like the original Bambu AMS addressing system.
+- BMCU units are enumerated automatically and receive their AMS number automatically.
+- Use this option unless AMS_AUTO does not work correctly with your setup.
 
-### AMS_A / AMS_B / AMS_C / AMS_D —— 旧版
+SOLO 固件
+示例文件：solo_0.095f.bin
 
-- 旧的手工指定 AMS 槽位固件。
-- 仅在 AMS_AUTO 工作不正常时使用。
-- 每个 BMCU 必须使用不同的槽位：AMS_A、AMS_B、AMS_C 或 AMS_D。
+此固件用于单 BMCU 独立工作。
+推荐用于单 BMCU 配置。
+
+耗材回退长度：
+- 0.095 米 = 9.5 厘米
+
+
+AMS_A / AMS_B / AMS_C / AMS_D 固件
+这些固件版本适用于：
+- 多 BMCU 配置
+- 需要更长的耗材回退距离
 
 如果你只有一个 BMCU 但需要比 SOLO 更长的回退距离，
 请使用 AMS_A 而不是 SOLO。
@@ -31,6 +44,12 @@
 - ams_a_0.10f.bin  -> 0.10 米 = 10 厘米
 - ams_a_0.50f.bin  -> 0.50 米 = 50 厘米
 数字即回退长度（单位：米）。
+
+[本 fork 说明] 为压缩固件数量，本仓库的 NO_AUTOLOAD 分支只提供默认档
+ams_*_0.20f.bin（0.20 米 = 20 厘米）。上面的 0.10 / 0.50 例子是上游原文，
+仅用于说明命名规则。若按下面方法量出的长度与 0.20 米差异较大（例如约 1.35 米），
+请参考仓库 analysis/ 目录下《BMCU-C-PJARCZAK-方案③全量定点化-结果报告.md》
+第 9.2 节恢复 39 档枚举后重新编译。
 
 
 多 BMCU 配置（2~4 个单元）
@@ -57,6 +76,7 @@ P1 打印机用户注意：
 - 许多 P1 配置使用较长的 PTFE 路径，因此通常需要更长的回退距离。
 - 即使只有一个 BMCU，AMS_A 通常也比 SOLO 更合适（选择你需要的长度）。
 
+Measure the required retraction from the end of the AMS splitter and add a small safety margin so the filament fully clears the splitter.
 
 --------------------------------------------------------------------------
 

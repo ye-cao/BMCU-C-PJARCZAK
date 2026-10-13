@@ -18,7 +18,9 @@
 #include <stddef.h>
 #include "i2c2.h"          // 硬件 I2C2 驱动：i2c2_init / i2c2_write
 #include "hal/time_hw.h"   // delay() / time_ms64()
-#include "ams.h"           // ams[] / _filament / BAMBU_BUS_AMS_NUM（只读）
+#include "ams.h"           // ams[] / _filament（只读）
+#include "bambu_bus_ams.h" // 【修复】bambubus_local_ams_index()：AUTO 寻址下不能直接用 BAMBU_BUS_AMS_NUM 当下标
+#include "fx_units.h"      // 【定点化】fx_meters_le：避免浮点比较助手
 #include "ch32v20x.h"      // CH32V203 寄存器定义（用于 probe_ack 的 I2C 标志位检查）
 #include "ch32v20x_i2c.h"  // I2C 外设操作函数
 
@@ -424,7 +426,7 @@ void SSD1306_OLED::draw_message(const char* line0, const char* line1,
     draw_line_if_changed(3, line3 ? line3 : "");
 }
 
-void SSD1306_OLED::draw_aht20(bool aht20_present, bool online, float temperature_c, float humidity_percent, bool comm_ok)
+void SSD1306_OLED::draw_aht20(bool aht20_present, bool online, int16_t temperature_dc, uint16_t humidity_dc, bool comm_ok)
 {
     if (!s_ready)
     {
@@ -453,9 +455,9 @@ void SSD1306_OLED::draw_aht20(bool aht20_present, bool online, float temperature
         return;
     }
 
-    /* 行1：温度/湿度（整数运算，避免依赖 printf 浮点） */
-    int16_t ti = (int16_t)(temperature_c * 10.0f);
-    uint16_t hi = (uint16_t)(humidity_percent * 10.0f);
+    /* 行1：温度/湿度（【定点化】入参已是 0.1°C / 0.1%RH 整数, 无需再换算） */
+    int16_t ti = temperature_dc;
+    uint16_t hi = humidity_dc;
 
     char thbuf[OLED_COLS + 1u];
     for (uint8_t i = 0; i < OLED_COLS; i++) thbuf[i] = ' ';
@@ -518,7 +520,7 @@ const char* SSD1306_OLED::motion_label(_filament_motion m)
 const char* SSD1306_OLED::material_label(uint8_t ch)
 {
     if (ch >= 4) return "----";
-    const _filament& f = ams[BAMBU_BUS_AMS_NUM].filament[ch];
+    const _filament& f = ams[bambubus_local_ams_index()].filament[ch];
 
     /* TPU 材质：显示内部写死型号（如 GFU98/GFU90） */
     if (f.filament_type == _filament_type::tpu)
@@ -596,7 +598,7 @@ void SSD1306_OLED::draw_channels()
         for (uint8_t i = 0; i < OLED_COLS; i++) line[i] = ' ';
         line[OLED_COLS] = 0;
 
-        const _filament& f = ams[BAMBU_BUS_AMS_NUM].filament[r];
+        const _filament& f = ams[bambubus_local_ams_index()].filament[r];
 
         int n = 0;
         line[n++] = (char)('0' + r);
@@ -606,7 +608,7 @@ void SSD1306_OLED::draw_channels()
         {
             line[n++] = 'E'; line[n++] = 'M'; line[n++] = 'P'; line[n++] = 'T'; line[n++] = 'Y';
         }
-        else if (f.meters <= 0.05f)
+        else if (fx_meters_le(f.meters, 0.05f))   /* 【定点化】纯位运算比较，不引入 __lesf2 */
         {
             line[n++] = 'N'; line[n++] = 'U'; line[n++] = 'L'; line[n++] = 'L';
             const char* c = color_name(f.color_R, f.color_G, f.color_B);
@@ -640,7 +642,7 @@ void SSD1306_OLED::notify_action(uint8_t ch, oled_action act)
 }
 
 void SSD1306_OLED::tick(bool aht20_present, bool aht20_online,
-                        float temperature_c, float humidity_percent,
+                        int16_t temperature_dc, uint16_t humidity_dc,
                         bool comm_ok)
 {
     if (!s_ready)
@@ -720,7 +722,7 @@ void SSD1306_OLED::tick(bool aht20_present, bool aht20_online,
     switch (s_page)
     {
         case oled_page::page_aht20:
-            draw_aht20(aht20_present, aht20_online, temperature_c, humidity_percent, comm_ok);
+            draw_aht20(aht20_present, aht20_online, temperature_dc, humidity_dc, comm_ok);
             break;
         case oled_page::page_channels:
             draw_channels();

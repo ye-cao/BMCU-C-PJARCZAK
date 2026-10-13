@@ -203,17 +203,18 @@ void ams_datas_save_run()
  */
 static void th_sensor_update_filament(void)
 {
-    float temp = 0.0f;
-    float humi = 0.0f;
-    const uint8_t ok = th_sensor_read(&temp, &humi);
+    int16_t  temp_cc = 0;   /* 温度, 单位 0.01°C */
+    uint16_t humi_cc = 0;   /* 湿度, 单位 0.01%RH */
+    const uint8_t ok = th_sensor_read(&temp_cc, &humi_cc);
 
     _ams *a = &ams[BMCU_LOCAL_AMS_INDEX];
     for (uint8_t i = 0u; i < 4u; i++)
     {
+        /* 厘单位转整数值: +50 再除 100, 与原 float 版 (x + 0.5f) 的取整行为等价 */
         if (!ok)
-            a->filament[i].compartment_temperature = (int8_t)(temp + 0.5f);
+            a->filament[i].compartment_temperature = (int8_t)((temp_cc + 50) / 100);
         if (!ok)
-            a->filament[i].compartment_humidity = (uint8_t)(humi + 0.5f);
+            a->filament[i].compartment_humidity = (uint8_t)((humi_cc + 50u) / 100u);
     }
 }
 
@@ -352,8 +353,8 @@ int main(void)
             SSD1306_OLED::tick(
                 th_sensor_is_present(),   /* 板上是否有传感器 */
                 th_sensor_is_online(),    /* 传感器是否在线 */
-                (float)a->filament[0].compartment_temperature,  /* 温度 */
-                (float)a->filament[0].compartment_humidity,     /* 湿度 */
+                (int16_t)((int16_t)a->filament[0].compartment_temperature * 10),  /* 温度 0.1°C */
+                (uint16_t)((uint16_t)a->filament[0].compartment_humidity * 10u),  /* 湿度 0.1%RH */
                 true                      /* 通讯状态 */
             );
         }

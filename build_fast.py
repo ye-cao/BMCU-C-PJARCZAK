@@ -46,7 +46,17 @@ SOLO_RETRACT = "0.095f"
 #   4    = AMS_AUTO：上游 V11 新增，固件在总线上自动协商本机 AMS 编号
 AMS_SLOTS = [("AUTO", 4), ("A", 0), ("B", 1), ("C", 2), ("D", 3)]
 
-RETRACTS = [
+# --- NO_AUTOLOAD（手动加载模式）下枚举的回抽长度 -------------------------------
+# 历史上这里枚举 0.10 ~ 2.00 共 39 档，导致 NO_AUTOLOAD 一个分支就占了整个矩阵的
+# 97%（2352 / 2424 个固件），而实际几乎没人挑档。
+# 现在 NO_AUTOLOAD 与 AUTOLOAD 一样：每个 (模式 × OLED × RGB × 槽位) 只出 1 个固件，
+# 回抽长度取默认值（= Motion_control.h 里 AMS_RETRACT_LEN 的默认 0.2f）。
+#
+# 想恢复全量 39 档：把 `RETRACTS = [RETRACT_DEFAULT]` 改成 `RETRACTS = RETRACTS_FULL`
+# 即可（RETRACTS_FULL 一直保留着，未删除）。
+RETRACT_DEFAULT = "0.20"
+
+RETRACTS_FULL = [
     "0.10", "0.15", "0.20", "0.25", "0.30", "0.35",
     "0.40", "0.45", "0.50", "0.55", "0.60", "0.65",
     "0.70", "0.75", "0.80", "0.85", "0.90", "0.95",
@@ -56,6 +66,8 @@ RETRACTS = [
     "1.90", "1.95", "2.00",
 ]
 
+RETRACTS = [RETRACT_DEFAULT]
+
 VARIANT_MACROS = [
     "BAMBU_BUS_AMS_NUM", "AMS_RETRACT_LEN",
     "BMCU_DM_TWO_MICROSWITCH", "BMCU_ONLINE_LED_FILAMENT_RGB",
@@ -63,8 +75,18 @@ VARIANT_MACROS = [
     "BMCU_OLED",
 ]
 RETRACT_MACRO = "AMS_RETRACT_LEN"
-PLACEHOLDER_FLOAT = 123.456
-PLACEHOLDER_BYTES = struct.pack("<f", PLACEHOLDER_FLOAT)
+
+# --- 回抽长度占位/锚点 ---------------------------------------------------
+# 历史上 AMS_RETRACT_LEN 是一个 float 宏，常量折叠后浮点位模式会作为
+# 4 字节字面量出现在镜像里，脚本据此做二进制替换。
+# 定点化后 motion_control_pull_back_um 变成整数，`(int32_t)(AMS_RETRACT_LEN*1e6f)`
+# 会被 -Os -flto 折叠成 lui+addi 两条指令的立即数，float 位模式不再出现在镜像中，
+# 原锚点彻底失效（39 个回抽长度固件会全部退化成同一个二进制）。
+# 现改为：源码里用 `volatile const int32_t moc_pull_back_um_anchor`（不可折叠，
+# 必定落在 .rodata），脚本按 int32 做替换。占位值须与 Motion_control.cpp 一致。
+PLACEHOLDER_FLOAT = 123.456          # 仅用于 pio 直接构建路径的 -DAMS_RETRACT_LEN
+PLACEHOLDER_UM = 123456000           # = 123.456 m，必与 moc_pull_back_um_anchor 相同
+PLACEHOLDER_BYTES = struct.pack("<i", PLACEHOLDER_UM)
 
 AUTO_RETRACT_CAP = "2.00"
 auto_retract = int(os.environ.get("AUTO_RETRACT", "1"))
@@ -84,6 +106,53 @@ TPU_FIX = [os.environ.get(f"BMCU_TPU_FIX{i}", "GFU85").strip() or "GFU85" for i 
 
 def log(msg):
     print(msg, flush=True)
+
+
+# 本机 safe-delete 守护：**单次工具调用**内删除 >200 个文件会直接把整个进程 SIGTERM 掉
+# （没有任何异常可捕获、stdout 会被缓冲吞掉，表现为"脚本静默挂死/无输出"）。
+# 全量重编的产物有 2400+、编译缓存有 1000+ 个文件，直接 rmtree 必然踩中。
+SAFE_DELETE_BUDGET = 150
+
+
+def reset_dir(path, reason):
+    """准备输出目录，**不做任何批量删除**。
+
+    本机 safe-delete 守护按单次请求的删除量计数（阈值 200），超限会直接把整个
+    进程 SIGTERM 掉，且 stdout 被缓冲吞掉 —— 表现为"脚本静默挂死"。全量重编的
+    产物有 2400+ 个文件，所以这里刻意不 rmtree：
+
+    - 目录不存在就建；已存在则原样保留；
+    - 本次要产出的文件由后续步骤直接覆盖；
+    - 属于旧配置的陈旧 .bin 由 `prune_stale()` 按"本次任务集"精确清除（正常为 0 个）。
+    """
+    os.makedirs(path, exist_ok=True)
+
+
+def prune_stale(root, keep_rel, suffix=".bin", budget=SAFE_DELETE_BUDGET):
+    """删除 root 下不在 keep_rel 里的 suffix 文件，超出安全预算则只告警不删。"""
+    stale = []
+    for dp, _, fns in os.walk(root):
+        for fn in fns:
+            if not fn.endswith(suffix):
+                continue
+            p = os.path.join(dp, fn)
+            rel = os.path.relpath(p, root).replace(os.sep, "/")
+            if rel not in keep_rel:
+                stale.append(p)
+    if not stale:
+        log(f"  [prune] {root}: 无陈旧产物")
+        return 0
+    if len(stale) > budget:
+        log(f"  [warn] {root} 有 {len(stale)} 个陈旧产物，超过安全预算 {budget}，"
+            f"已跳过删除（避免被 safe-delete 守护拦截），请手动清理")
+        return 0
+    for p in stale:
+        try:
+            os.remove(p)
+        except OSError:
+            pass
+    log(f"  [prune] {root}: 删除 {len(stale)} 个陈旧产物")
+    return len(stale)
 
 
 # ===== 工具链定位 =====
@@ -528,9 +597,7 @@ for mode_dir, p1s, soft_load in MODES:
 total_tasks = len(tasks)
 log(f"  总计 {total_tasks} 个固件编译任务")
 
-if os.path.exists(OUT_DIR):
-    shutil.rmtree(OUT_DIR, ignore_errors=True)
-os.makedirs(OUT_DIR, exist_ok=True)
+reset_dir(OUT_DIR, "旧固件目录")
 shutil.copy(TXT_MODE, os.path.join(OUT_DIR, OUT_GUIDE))
 for mode_dir, p1s, soft_load in MODES:
     for oled_base in (OUT_DIR, os.path.join(OUT_DIR, "noled")):
@@ -550,6 +617,12 @@ for mode_dir, p1s, soft_load in MODES:
                 for slot in ["SOLO"] + [f"AMS_{s}" for s, _ in AMS_SLOTS]:
                     os.makedirs(os.path.join(b, slot), exist_ok=True)
 
+# 精确清理旧配置残留的 .bin（正常情况下为 0 个，因为本次会覆盖全部需要的文件名）
+_keep_rel = {os.path.relpath(t[0], OUT_DIR).replace(os.sep, "/") for t in tasks}
+n_pruned = prune_stale(OUT_DIR, _keep_rel, suffix=".bin")
+if n_pruned:
+    log(f"  清理旧固件 {n_pruned} 个")
+
 
 # ====================================================================
 # 第四步：并行预编译所有 .o
@@ -558,9 +631,9 @@ log("=" * 60)
 log("  第四步：并行预编译所有 .o 文件")
 log("=" * 60)
 
-if os.path.exists(CACHE_DIR):
-    shutil.rmtree(CACHE_DIR, ignore_errors=True)
-os.makedirs(CACHE_DIR)
+# 刻意不清空编译缓存：每个需要的 .o 都会被无条件重编覆盖，残留文件永远不会被链接，
+# 因此复用是安全的；而清空 1000+ 个文件会触发本机 safe-delete 守护把进程 SIGTERM 掉。
+os.makedirs(CACHE_DIR, exist_ok=True)
 COMMON_OBJ_DIR = os.path.join(CACHE_DIR, "common")
 os.makedirs(COMMON_OBJ_DIR, exist_ok=True)
 
@@ -587,6 +660,8 @@ def variant_defines(dm, rgb, p1s, soft_load, ams_num, retract="0.095f", oled=1):
         f"-DBAMBU_BUS_AMS_NUM={ams_num}",
         f"-DAMS_RETRACT_LEN={retract}",
         f"-DBMCU_OLED={oled}",
+        # 回抽长度走整数锚点 + 二进制替换（见文件头占位/锚点说明）
+        "-DBMCU_RETRACT_UM_ANCHOR=1",
     ]
     if dm == 1 and not auto_retract:
         defines.append("-DBMCU_DM_AUTO_RETRACT=0")
@@ -805,11 +880,19 @@ def patch_and_copy(task):
 
     data = bytearray(base_data)
     retract_val = float(retract_str.rstrip("f"))
-    target_bytes = struct.pack("<f", retract_val)
+    target_um = int(round(retract_val * 1000000.0))
+    if not (0 <= target_um < 2 ** 31):
+        return f"retract out of int32 range in {vkey}: {retract_str}"
+    target_bytes = struct.pack("<i", target_um)
 
     pos = data.find(PLACEHOLDER_BYTES)
     if pos == -1:
         return f"PLACEHOLDER not found in {vkey}"
+    if data.find(PLACEHOLDER_BYTES, pos + 1) != -1:
+        return f"PLACEHOLDER ambiguous (multiple hits) in {vkey}"
+    if pos % 4 != 0:
+        # 锚点是 int32 全局量，必须是 4 字节对齐；.bin 的偏移即 VMA（FLASH ORIGIN=0）
+        return f"PLACEHOLDER misaligned at {pos} in {vkey}"
     data[pos:pos+4] = target_bytes
 
     os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
@@ -840,8 +923,9 @@ t_patch = time.perf_counter() - t_patch
 # ====================================================================
 # 清理 & 汇总
 # ====================================================================
-if os.path.exists(CACHE_DIR):
-    shutil.rmtree(CACHE_DIR, ignore_errors=True)
+# 保留 CACHE_DIR（.pio_parallel/obj_cache）：清空 1000+ 个 .o 会触发本机
+# safe-delete 守护把进程 SIGTERM 掉；留着还能让下一次运行省掉大部分编译。
+# 需要清空时请手动分批删除，或整个删掉 .pio_parallel/ 目录。
 
 total_time = time.perf_counter() - GLOBAL_START
 tm, ts = divmod(int(total_time), 60)

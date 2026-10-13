@@ -53,11 +53,12 @@ void  ADC_DMA_poll(void);
  * @brief 获取最新滤波后的 8 通道 ADC 电压值
  *
  * 内部先调用 ADC_DMA_poll() 处理新数据,
- * 若有新数据则将累加和转换为浮点电压值。
+ * 若有新数据则将累加和做定点换算为微伏值。
  *
- * @return 指向 8 个 float 的数组 (单位: 伏特), 静态缓冲区
+ * @return 指向 8 个 int32 的数组 (单位: 微伏 µV, 量程 0 ~ 3300000), 静态缓冲区
+ *         【定点化】原返回 float 伏特, 现返回 int32 微伏
  */
-const float* ADC_DMA_get_value(void);
+const int32_t* ADC_DMA_get_value(void);
 
 /**
  * @brief 获取 ADC 数据发布代数（V11 新增，校准事件驱动采样用于检测新数据）

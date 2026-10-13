@@ -153,7 +153,7 @@ bool Flash_AMS_state_write(uint8_t loaded_channel);
  * @param valid_mask 输出: 4通道校准有效位掩码 (bit0..3), 传 NULL 则不返回
  * @return true 读取成功
  */
-bool Flash_MC_PULL_cal_read(float offs[4], float vmin[4], float vmax[4], int8_t pol[4], float dm_none[4], uint8_t* valid_mask);
+bool Flash_MC_PULL_cal_read(int32_t offs[4], int32_t vmin[4], int32_t vmax[4], int8_t pol[4], int32_t dm_none[4], uint8_t* valid_mask);
 
 /**
  * @brief 写入全部电机拉动校准数据（V11 扩展: 新增 DM 空程阈值与有效位掩码）
@@ -165,7 +165,7 @@ bool Flash_MC_PULL_cal_read(float offs[4], float vmin[4], float vmax[4], int8_t 
  * @param valid_mask  4通道校准有效位掩码 (bit0..3)
  * @return true 写入成功
  */
-bool Flash_MC_PULL_cal_write_all(const float offs[4], const float vmin[4], const float vmax[4], const int8_t pol[4], const float dm_none[4], uint8_t valid_mask);
+bool Flash_MC_PULL_cal_write_all(const int32_t offs[4], const int32_t vmin[4], const int32_t vmax[4], const int8_t pol[4], const int32_t dm_none[4], uint8_t valid_mask);
 
 /**
  * @brief 清除电机拉动校准数据 (擦除校准页)
