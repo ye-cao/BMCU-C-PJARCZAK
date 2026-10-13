@@ -2447,6 +2447,12 @@ static uint32_t before_pb_last_count[4]      = {0,0,0,0};
 static uint32_t before_pb_retracted_count[4] = {0,0,0,0};
 static int8_t before_pb_sign[4]        = {0,0,0,0};
 
+/* ===== redetect 确认状态（开关反抖）===== */
+/** @brief 本轮 redetect 是否已初始化 */
+static bool     rd_ready[4]   = {false, false, false, false};
+/** @brief 开关连续有料起始时刻(ms) */
+static uint64_t rd_hold_ms[4] = {0, 0, 0, 0};
+
 /**
  * @brief 处理回退和重新检测运动序列
  *        回退阶段：动态速度拉回目标距离

@@ -225,6 +225,10 @@ static const ams_online_detect::Config g_online_detect_config = {
     .service_silence_ticks = 1500u * time_hw_tpms,
 };
 static uint8_t online_detect_prefix_now = 0x0Cu;
+/** @brief 本机是否已完成总线注册（V11） */
+static bool have_registered = false;
+/** @brief 在线检测阶段：0=未开始 1=已回应0x0C 2=已回应0x0A 3=注册完成（V11） */
+static uint8_t online_detect_phase = 0u;
 
 bool bambubus_registered(void)
 {

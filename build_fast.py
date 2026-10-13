@@ -40,6 +40,12 @@ TXT_SLOTS = "which_to_choose_slots.txt"
 OUT_GUIDE = "README.md"
 
 SOLO_RETRACT = "0.095f"
+
+# AMS 槽位定义：(目录后缀, BAMBU_BUS_AMS_NUM)
+#   0..3 = 固定槽位 AMS_A..AMS_D（旧版 legacy）
+#   4    = AMS_AUTO：上游 V11 新增，固件在总线上自动协商本机 AMS 编号
+AMS_SLOTS = [("AUTO", 4), ("A", 0), ("B", 1), ("C", 2), ("D", 3)]
+
 RETRACTS = [
     "0.10", "0.15", "0.20", "0.25", "0.30", "0.35",
     "0.40", "0.45", "0.50", "0.55", "0.60", "0.65",
@@ -457,24 +463,64 @@ log("  第三步：收集任务 & 创建输出目录")
 log("=" * 60)
 
 tasks = []
+
+
+def _env_int_list(name):
+    """读取逗号分隔的整数白名单环境变量；为空表示不过滤"""
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return None
+    return set(int(x) for x in raw.split(",") if x.strip() != "")
+
+
+# 组合过滤（用于只编译指定组合做验证，避免全量 2000+ 固件）
+#   BUILD_AMS : BAMBU_BUS_AMS_NUM 白名单，如 "4" 只编译 AUTO，"0,4" 编译 A 与 AUTO
+#   BUILD_DM  : 1=AUTOLOAD，0=NO_AUTOLOAD
+#   BUILD_RGB : 1=FILAMENT_RGB_ON，0=FILAMENT_RGB_OFF
+#   BUILD_OLED: 1=带 OLED，0=noled
+#   BUILD_MODE: 模式目录名白名单，如 "standard(A1)"
+F_AMS = _env_int_list("BUILD_AMS")
+F_DM = _env_int_list("BUILD_DM")
+F_RGB = _env_int_list("BUILD_RGB")
+F_OLED = _env_int_list("BUILD_OLED")
+F_MODE = os.environ.get("BUILD_MODE", "").strip() or None
+FILTER_ON = any(x is not None for x in (F_AMS, F_DM, F_RGB, F_OLED, F_MODE))
+if FILTER_ON:
+    log(f"  组合过滤已启用: AMS={F_AMS} DM={F_DM} RGB={F_RGB} OLED={F_OLED} MODE={F_MODE}")
+    if F_AMS is not None:
+        AMS_SLOTS[:] = [s for s in AMS_SLOTS if s[1] in F_AMS]
+        log(f"  -> 实际槽位: {AMS_SLOTS}")
+
 for mode_dir, p1s, soft_load in MODES:
+    if F_MODE is not None and mode_dir != F_MODE:
+        continue
     for oled in (1, 0):
+        if F_OLED is not None and oled not in F_OLED:
+            continue
         oled_base = os.path.join(OUT_DIR, "noled") if oled == 0 else OUT_DIR
         for dm in (1, 0):
+            if F_DM is not None and dm not in F_DM:
+                continue
             dm_dir = "AUTOLOAD" if dm == 1 else "NO_AUTOLOAD"
             for rgb in (1, 0):
+                if F_RGB is not None and rgb not in F_RGB:
+                    continue
                 rgb_dir = "FILAMENT_RGB_ON" if rgb == 1 else "FILAMENT_RGB_OFF"
                 base = os.path.join(oled_base, mode_dir, dm_dir, rgb_dir) if oled == 0 else os.path.join(OUT_DIR, mode_dir, dm_dir, rgb_dir)
+                # SOLO 属于固定槽位(ams_num=0)；过滤掉 0 时不再生成
+                want_solo = (F_AMS is None) or (0 in F_AMS)
                 if dm == 1 and auto_retract:
-                    tasks.append((os.path.join(base, "SOLO", f"solo_{AUTO_RETRACT_CAP}f_auto.bin"),
-                                  0, f"{AUTO_RETRACT_CAP}f", dm, rgb, p1s, soft_load, oled))
-                    for slot, ams_num in (("A", 0), ("B", 1), ("C", 2), ("D", 3)):
+                    if want_solo:
+                        tasks.append((os.path.join(base, "SOLO", f"solo_{AUTO_RETRACT_CAP}f_auto.bin"),
+                                      0, f"{AUTO_RETRACT_CAP}f", dm, rgb, p1s, soft_load, oled))
+                    for slot, ams_num in AMS_SLOTS:
                         tasks.append((os.path.join(base, f"AMS_{slot}", f"ams_{slot.lower()}_{AUTO_RETRACT_CAP}f_auto.bin"),
                                       ams_num, f"{AUTO_RETRACT_CAP}f", dm, rgb, p1s, soft_load, oled))
                 else:
-                    tasks.append((os.path.join(base, "SOLO", f"solo_{SOLO_RETRACT}.bin"),
-                                  0, SOLO_RETRACT, dm, rgb, p1s, soft_load, oled))
-                    for slot, ams_num in (("A", 0), ("B", 1), ("C", 2), ("D", 3)):
+                    if want_solo:
+                        tasks.append((os.path.join(base, "SOLO", f"solo_{SOLO_RETRACT}.bin"),
+                                      0, SOLO_RETRACT, dm, rgb, p1s, soft_load, oled))
+                    for slot, ams_num in AMS_SLOTS:
                         for r in RETRACTS:
                             tasks.append((os.path.join(base, f"AMS_{slot}", f"ams_{slot.lower()}_{r}f.bin"),
                                           ams_num, f"{r}f", dm, rgb, p1s, soft_load, oled))
@@ -501,7 +547,7 @@ for mode_dir, p1s, soft_load in MODES:
                 b = os.path.join(dm_base, rgb_dir)
                 os.makedirs(b, exist_ok=True)
                 shutil.copy(TXT_SLOTS, os.path.join(b, OUT_GUIDE))
-                for slot in ("SOLO", "AMS_A", "AMS_B", "AMS_C", "AMS_D"):
+                for slot in ["SOLO"] + [f"AMS_{s}" for s, _ in AMS_SLOTS]:
                     os.makedirs(os.path.join(b, slot), exist_ok=True)
 
 

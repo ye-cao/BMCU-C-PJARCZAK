@@ -512,25 +512,30 @@ void AS5600_soft_IIC_many::updata_stu()
 /**
  * @brief 更新所有通道的原始角度值和在线标志
  * @details 读取AS5600原始角度寄存器(0x0C)获取12位角度值(0~4095)
- *          - 读取成功(error[i]==0): raw_angle[i]=data[i], online[i]=true
- *          - 读取失败(error[i]!=0): raw_angle[i]=0, online[i]=false
+ *          - 读取成功(error[i]==0 且 data[i]<=4095): raw_angle[i]=data[i], online[i]=true
+ *          - 读取失败: online[i]=false, 角度保留上次值(不清零, 避免飞车误判)
  *          原始角度值代表磁铁的绝对旋转角度，每圈4096个计数
+ * @return  本轮读取成功的通道位掩码 (bit0..3)
  */
-void AS5600_soft_IIC_many::updata_angle()
+uint8_t AS5600_soft_IIC_many::updata_angle()
 {
     read_reg16(AS5600_raw_angle);   // 读取16位原始角度寄存器(0x0C)
+    uint8_t valid = 0u;             // 有效通道位掩码
 
     for (int i = 0; i < numbers; i++)
     {
-        if (error[i] == 0)
+        if (error[i] == 0 && data[i] <= 4095u)
         {
+            valid |= (uint8_t)(1u << i);
             raw_angle[i] = data[i];     // 保存角度值(12位有效)
             online[i] = true;
         }
         else
         {
-            raw_angle[i] = 0;           // 读取失败，角度清零
+            // 读取失败: 标记离线但保留上次角度, 防止位置突变
             online[i] = false;
         }
     }
+
+    return valid;
 }
