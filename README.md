@@ -300,7 +300,7 @@ https://github.com/jarczakpawel/BMCU-Flasher
 - `build_fast.py` 支持 AMS_AUTO（`ams_num = 4`），并新增 `BUILD_AMS / BUILD_DM / BUILD_RGB / BUILD_OLED / BUILD_MODE` 环境变量筛选，便于只编译指定组合做验证；新增 `RETRACTS_FULL` 开关可一键还原全量 39 档回抽长度。
 - 文档：`which_to_choose_mode.txt` 增加本 fork 选型总览与校准格式变更提醒；`which_to_choose_filament_rgb.txt` 说明通道灯亮度统一 10% 与颜色显示的门控条件；`which_to_choose_slots.txt` 说明本 fork 仅提供 0.20 m 默认档。
 - 验证：144/144 编译成功；`verify_matrix.py` 全部通过（占位值残留 0、锚点不匹配 0、锚点未对齐 0、超 61440 B 0）。
-- 发布产物由 120.1 MiB 缩小为 7.3 MiB。
+- 发布产物（解压后）由 120.1 MiB 缩小为约 7.5 MiB，发布包 zip 约 5.4 MiB。
 
 ### 贡献者
 - **[jarczakpawel](https://github.com/jarczakpawel)** — BMCU 原始固件作者
